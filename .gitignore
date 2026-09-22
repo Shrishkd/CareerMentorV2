@@ -21,10 +21,12 @@ __pycache__/
 # Runtime data (uploads, generated reports, sessions, local stats)
 Backend/uploads/
 Backend/reports/
-uploads/
-reports/
-data/
+/uploads/
+/reports/
+/data/
 *.pdf
+# ...except the sample reports shown in the README
+!docs/reports/*.pdf
 
 # Model weights (pulled at runtime)
 *.pt
