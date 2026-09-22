@@ -581,7 +581,7 @@ The backend needs Ollama and around 8 GB RAM, which free hosting tiers don't off
 
 **Shrish Das**, B.Tech CSE (AI & ML), VIT Bhopal University
 
-[![Portfolio](https://img.shields.io/badge/Portfolio-shrish--portfolio.netlify.app-000000?style=flat-square&logo=netlify)](https://shrish-portfolio.netlify.app)
+[![Portfolio](https://img.shields.io/badge/Portfolio-shrishcraft.vercel.app-000000?style=flat-square&logo=vercel)](https://shrishcraft.vercel.app)
 [![GitHub](https://img.shields.io/badge/GitHub-Shrishkd-181717?style=flat-square&logo=github)](https://github.com/Shrishkd)
 
 Feedback, issues and pull requests are welcome. If Career Mentor helped you prepare, a ⭐ on the repo is appreciated.

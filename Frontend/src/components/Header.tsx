@@ -115,7 +115,7 @@ export function Footer() {
       <div className="container mx-auto flex flex-col items-center gap-2 px-6 text-center text-sm text-muted-foreground">
         <div className="flex gap-6">
           <Link to="/vlog" className="hover:text-foreground">Founder Vlog</Link>
-          <a href="https://shrish-portfolio.netlify.app" target="_blank" rel="noreferrer" className="hover:text-foreground">
+          <a href="https://shrishcraft.vercel.app" target="_blank" rel="noreferrer" className="hover:text-foreground">
             Built by Shrish Das
           </a>
         </div>

@@ -27,6 +27,7 @@ Backend/reports/
 *.pdf
 # ...except the sample reports shown in the README
 !docs/reports/*.pdf
+!docs/Career_Mentor_Project_Report.pdf
 
 # Model weights (pulled at runtime)
 *.pt
