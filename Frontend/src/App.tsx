@@ -27,7 +27,11 @@ function RouteBoundary({ children }: { children: React.ReactNode }) {
 
 function ScrollToTop() {
   const { pathname } = useLocation();
-  useEffect(() => window.scrollTo(0, 0), [pathname]);
+  // Block body on purpose: newer browsers return a Promise from scrollTo, and an effect must
+  // return nothing or a cleanup function. Returning the Promise crashed React on navigation.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
   return null;
 }
 
