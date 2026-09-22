@@ -1,219 +1,105 @@
-# 🚀 Career Mentor - AI-Powered Interview Web App
+# Career Mentor
 
-**Career Mentor** is an AI-driven interview analysis platform that helps candidates practice real interviews and receive instant, detailed feedback. The system leverages **Generative AI**, **Speech Recognition**, and **Behavioral Analysis** to simulate an intelligent interviewer that not only asks domain-relevant questions but also evaluates user responses, expressions, and engagement.
+Mock interviews built from your resume. Upload a resume, answer five questions about the projects and skills on it (three conceptual, two coding), and get a graded report with model answers plus an activity report from your webcam. A separate resume checker scores ATS readiness against a job description.
 
----
+Everything AI runs locally on open-source models. There are no accounts and no paid APIs.
 
-## 🎯 Project Overview
+| Part | Technology |
+| --- | --- |
+| Frontend | React 18, TypeScript, Vite, Tailwind, shadcn/ui, Monaco editor, Recharts |
+| Backend | Flask |
+| Language model | Qwen3-4B via [Ollama](https://ollama.com) (any Ollama model works) |
+| Speech-to-text | OpenAI Whisper (local) |
+| Activity monitoring | MediaPipe face mesh, pose and hands on frames sent by the browser |
+| Reports | ReportLab + Matplotlib |
 
-Career Mentor provides a complete mock-interview experience by:
-
-* Analyzing the candidate's **resume** to generate tailored questions.
-* Conducting a live **AI-powered interview** with voice and code-based responses.
-* Monitoring user activity using **camera tracking** for focus & attention.
-* Generating an **AI-evaluated performance report** with insights, scores, and improvement suggestions.
-
----
-
-## 🧠 Key Features
-
-### 🧾 Resume-based Question Generation
-
-* Upload your resume in PDF format.
-* Backend AI (Gemini API) extracts key skills and generates relevant interview questions.
-
-### 🎤 AI Interview Assistant
-
-* Conducts interviews using Text-to-Speech (TTS) and listens via Speech-to-Text (Whisper STT).
-* Evaluates voice answers based on **clarity**, **content**, and **relevance**.
-
-### 💻 Coding Round Simulation
-
-* Integrated **Monaco Editor IDE** for programming questions.
-* Supports code execution and compilation using **Judge0 API**.
-
-### 🎥 Live Monitoring System
-
-* Uses camera monitoring (via OpenCV) to analyze user engagement.
-* Detects distractions, gaze direction, and movements.
-
-### 📊 Comprehensive Report Generation
-
-* Automatically generates a **detailed interview report** (PDF) containing:
-
-  * Technical and behavioral analysis.
-  * Individual question-wise feedback.
-  * Visual performance graphs.
-  * Overall score and hiring recommendation.
-
-### ☁️ Supabase Integration
-
-* Securely stores resumes, audio responses, and reports.
-* Generates signed URLs for private access.
-
----
-
-## 🏗️ Tech Stack
-
-| Layer                  | Technology                                              |
-| ---------------------- | ------------------------------------------------------- |
-| **Frontend**           | React + TypeScript + Vite + TailwindCSS + Framer Motion |
-| **Backend**            | Flask (Python)                                          |
-| **AI/ML**              | Google Gemini API, OpenAI Whisper, SpeechRecognition    |
-| **Database & Storage** | Supabase (Postgres + Storage)                           |
-| **Code Execution**     | Judge0 API                                              |
-| **Deployment**         | Render (Frontend + Backend)                             |
-
----
-
-## ⚙️ Project Structure
+## How it works
 
 ```
-Career_Mentor/
-├── Backend/
-│   ├── backend_api.py       # Flask API with Supabase integration
-│   ├── exp2.py              # AI logic for question generation & evaluation
-│   ├── livevid1.py          # Camera monitoring module
-│   ├── requirements.txt
-│   └── .env                 # Environment variables (Google, RapidAPI, Supabase)
-│
-├── Frontend/
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── ResumeUpload.tsx
-│   │   │   ├── Interview.tsx
-│   │   │   ├── InterviewResults.tsx
-│   │   ├── App.tsx
-│   │   └── main.tsx
-│   ├── public/
-│   ├── index.html
-│   └── package.json
-│   
-│
-└── README.md
-```
----
-## 📸 Screenshot
-<!-- Row 1 -->
-<div style="display:flex; gap:12px; margin-bottom:12px;">
-  <img width="48%" alt="Home Page" src="https://github.com/user-attachments/assets/8e96a75f-993f-4e6f-b065-9175c5d9bde3" />
-  <img width="48%" alt="Resume Upload Page" src="https://github.com/user-attachments/assets/8803e726-0431-4412-b4d8-823be10999ff" />
-</div>
-
-<!-- Row 2 -->
-<div style="display:flex; gap:12px; margin-bottom:12px;">
-  <img width="48%" alt="Interview Question Screen" src="https://github.com/user-attachments/assets/a4b0ce9f-ac1e-4fa4-a915-3eb5f1d6b7c5" />
-  <img width="48%" alt="Coding Question Screen" src="https://github.com/user-attachments/assets/a59aa532-def6-4332-a618-dc2a3cc55d54" />
-</div>
-
-<!-- Row 3 -->
-<div style="display:flex; gap:12px; margin-bottom:12px;">
-  <img width="48%" alt="Performance Overview Graph"  src="https://github.com/user-attachments/assets/a4659955-d2f8-4021-9f41-2bde352531a4" />
-  <img width="48%" alt="Detailed Question Analysis" src="https://github.com/user-attachments/assets/fb53604c-7e26-4f62-9bdc-e14a38c8ef23" />
-</div>
-
-<!-- Row 4 -->
-<div style="display:flex; gap:12px; margin-bottom:12px;">
-  <img width="48%" alt="User Camera Image 2" src="https://github.com/user-attachments/assets/20116dcb-d1bc-479d-a85b-6c918a2deb9c" />
-  <img width="48%" alt="User Camera Image 1" src="https://github.com/user-attachments/assets/18e1f950-6bc3-4dcc-b806-4340423fbdd3" />
-</div>
-
-<!-- Row 5 -->
-<div style="display:flex; gap:12px;">
-  <img width="48%" alt="Camera Monitoring Report" src="https://github.com/user-attachments/assets/cd3910d4-5128-479e-ad45-fdda29f5b9e4" />
-</div>
-
-
-
-
-
-
-
----
-## Link
-https://careermentor-ajvl.onrender.com
----
-
-## 🚀 Deployment Guide
-
-### 🟢 Backend on Render
-
-1. Push repo to GitHub.
-2. Create new **Web Service** on Render.
-3. Root directory → `Backend`
-4. Build Command:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-5. Start Command:
-
-   ```bash
-   gunicorn backend_api:app --bind 0.0.0.0:$PORT
-   ```
-6. Add environment variables in Render Dashboard (as above).
-
-### 🟣 Frontend on Render
-
-1. Create new **Static Site** on Render.
-2. Root directory → `Frontend`
-3. Build Command:
-
-   ```bash
-   npm install && npm run build
-   ```
-4. Publish Directory: `dist`
-5. Add environment variables (starting with `VITE_`).
-
----
-
-## 📁 Data Flow Summary
-
-```
-User → Upload Resume → Backend (exp2.py) → Generate Questions
-     ↓
-Frontend Interview Page → AI Interview (Voice + Code)
-     ↓
-Backend (Whisper + Gemini) → Evaluate Answers
-     ↓
-Generate Final PDF Report → Upload to Supabase
-     ↓
-Frontend → Displays Report & Download Link
+Browser                               Flask backend                       Ollama
+───────                               ─────────────                       ──────
+Upload resume  ─────────────────────► parse resume (PyMuPDF / DOCX)
+                                      generate 5 questions  ─────────────► qwen3:4b
+Answer by voice / text / code  ─────► queue ──► Whisper ──► grade  ──────► qwen3:4b
+Webcam frame every 2.5 s  ──────────► MediaPipe: gaze, posture, faces
+Tab switches  ──────────────────────► logged on the session
+Finish  ────────────────────────────► final assessment ─────────────────► qwen3:4b
+                                      interview PDF + activity PDF
 ```
 
----
+Grading runs in a background queue, so the candidate moves straight to the next question while earlier answers are transcribed and scored.
 
-## 🧩 Future Improvements
+## Running locally
 
-* Real-time behavioral emotion tracking using DeepFace.
-* Multi-round interview scheduling.
-* Recruiter dashboard for candidate comparison.
-* Integration with LinkedIn for resume import.
-* GPT-powered career recommendations.
+**Prerequisites:** Python 3.11, Node 18+, [ffmpeg](https://ffmpeg.org) on PATH, and Ollama.
 
----
+```bash
+# 1. Model
+ollama pull qwen3:4b
 
-## 👨‍💻 Author
+# 2. Backend
+cd Backend
+python -m venv ../.venv && ../.venv/Scripts/activate   # macOS/Linux: source ../.venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python backend_api.py                                   # http://localhost:8000
 
-**Shrish [https://shrish-portfolio.netlify.app]**
+# 3. Frontend (new terminal)
+cd Frontend
+npm install
+npm run dev                                             # http://localhost:8080
+```
 
+The dashboard's **Local AI status** panel shows whether Ollama, Whisper and MediaPipe are ready.
 
----
+### Configuration (`Backend/.env`)
 
-## 🪪 License
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `LLM_MODEL` | `qwen3:4b` | Any Ollama model name, e.g. `qwen3:4b-instruct-2507-q4_K_M` or your fine-tuned `career-mentor` |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
+| `LLM_TIMEOUT` | `300` | Seconds per model call. CPU inference is slow. |
+| `WHISPER_MODEL` | `small` | `base` is about twice as fast, `small` is more accurate |
+| `LLM_LOG_INTERACTIONS` | `1` | Saves prompts and responses for fine-tuning |
 
-This project is licensed under the MIT License - feel free to modify and build upon it for learning or open development.
+`Frontend/.env` accepts `VITE_API_URL` (empty uses the Vite proxy) and an optional `VITE_RAPIDAPI_KEY` for the Judge0 "Run code" button.
 
----
+## Choosing and fine-tuning the model
 
-## 💬 Feedback & Contributions
+The default is **Qwen3-4B**. On an 8 GB RAM laptop without a GPU it is the best balance of quality and speed among small open models: it returns valid structured JSON reliably, follows grading rubrics well, fits in about 2.5 GB at 4-bit, and is Apache-2.0 licensed with first-class fine-tuning support. Expect about 60 seconds to grade one answer on a CPU. `llama3.2:3b` is faster but noticeably shallower as a grader.
 
-If you’d like to improve Career Mentor or integrate your own AI models — pull requests and discussions are welcome!
+To fine-tune on your own interviews:
 
-> ⭐ Don’t forget to star the repository if you find it helpful!
+1. Use the app. Every model call is logged to `data/finetune/interactions.jsonl`.
+2. `python finetune/prepare_dataset.py` writes `review.jsonl`. Correct weak responses and mark bad ones `"keep": false`.
+3. `python finetune/prepare_dataset.py --use-review` writes `train.jsonl` and `val.jsonl`.
+4. Run `finetune/train_qlora.py` on a free Colab or Kaggle GPU (QLoRA with Unsloth, exports GGUF).
+5. `ollama create career-mentor -f finetune/Modelfile`, then set `LLM_MODEL=career-mentor`.
 
+## Project structure
 
+```
+Backend/
+  backend_api.py       Flask routes, session store, grading queue, local stats
+  llm.py               Ollama client with JSON-schema output + interaction logging
+  interview_engine.py  question generation, rubric grading, final assessment
+  resume_analyzer.py   PDF/DOCX parsing, section/skill detection, deterministic ATS scoring
+  monitoring.py        webcam frame analysis (gaze, posture, faces, hands)
+  speech.py            Whisper transcription
+  reports.py           interview, activity and ATS PDFs
+Frontend/src/
+  pages/               Index, Dashboard, ResumeUpload, GrantPermissions, Interview, InterviewResults, ATSChecker
+  lib/api.ts           typed API client
+  lib/profile.ts       anonymous local profile (replaces login)
+finetune/              dataset builder, QLoRA training script, Ollama Modelfile
+```
 
+## Deployment
 
+`Backend/Dockerfile` builds the API. It expects an Ollama server reachable at `OLLAMA_HOST`. Free hosting tiers such as Render's cannot run a 4B model, so host the backend on a machine with at least 8 GB RAM, or point `OLLAMA_HOST` at a GPU box. The frontend is a static build (`npm run build`, publish `Frontend/dist`) with `VITE_API_URL` set to the backend URL.
 
+## Author
 
+**Shrish Das** · [shrish-portfolio.netlify.app](https://shrish-portfolio.netlify.app)
+
+MIT License.

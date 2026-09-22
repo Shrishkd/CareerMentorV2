@@ -1,119 +1,60 @@
 import { Toaster } from "@/components/ui/toaster";
-import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { useEffect } from "react";
 import { ThemeProvider } from "./components/ThemeContext";
-
+import ErrorBoundary from "./components/ErrorBoundary";
 import Index from "./pages/Index";
-import Login from "./pages/Login";
-import Signup from "./pages/Signup";
-import ForgotPassword from "./pages/ForgotPassword"; 
-import ResetPassword from "./pages/ResetPassword";
 import Dashboard from "./pages/Dashboard";
-import Interview from "./pages/Interview";
-import ATSChecker from "./pages/ATSChecker";
 import ResumeUpload from "./pages/ResumeUpload";
 import GrantPermissions from "./pages/GrantPermissions";
-import NotFound from "./pages/NotFound";
+import Interview from "./pages/Interview";
 import InterviewResults from "./pages/InterviewResults";
+import ATSChecker from "./pages/ATSChecker";
 import Vlog from "./pages/Vlog";
-import ProtectedRoute from "./components/auth/ProtectedRoute";
+import NotFound from "./pages/NotFound";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { refetchOnWindowFocus: false } },
+});
+
+// Keyed by path so an error on one page clears when you navigate away.
+function RouteBoundary({ children }: { children: React.ReactNode }) {
+  const { pathname } = useLocation();
+  return <ErrorBoundary key={pathname}>{children}</ErrorBoundary>;
+}
+
+function ScrollToTop() {
+  const { pathname } = useLocation();
+  useEffect(() => window.scrollTo(0, 0), [pathname]);
+  return null;
+}
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <ThemeProvider>
       <TooltipProvider>
         <Toaster />
-        <Sonner />
         <BrowserRouter>
+          <ScrollToTop />
+          <RouteBoundary>
           <Routes>
-            {/* Public / open routes */}
             <Route path="/" element={<Index />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/resume-upload" element={<ResumeUpload />} />
+            <Route path="/grant-permissions" element={<GrantPermissions />} />
+            <Route path="/interview" element={<Interview />} />
+            <Route path="/results" element={<InterviewResults />} />
+            <Route path="/InterviewResults" element={<Navigate to="/results" replace />} />
+            <Route path="/ats-checker" element={<ATSChecker />} />
             <Route path="/vlog" element={<Vlog />} />
-            <Route
-              path="/login"
-              element={
-                
-                  <Login />
-                
-              }
-            />
-            <Route
-              path="/signup"
-              element={               
-                  <Signup />               
-              }
-            />
-            <Route
-              path="/forgot-password" 
-              element={            
-                  <ForgotPassword />           
-              } 
-              />
-
-             <Route 
-                path="/reset-password" 
-                element={        
-                    <ResetPassword />     
-                } 
-                /> 
-
-            {/* Protected routes (only when signed in) */}
-            <Route
-              path="/dashboard"
-              element={
-                <ProtectedRoute>
-                  <Dashboard />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/resume-upload"
-              element={
-                <ProtectedRoute>
-                  <ResumeUpload />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/grant-permissions"
-              element={
-                <ProtectedRoute>
-                  <GrantPermissions />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/interview"
-              element={
-                <ProtectedRoute>
-                  <Interview />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/InterviewResults"
-              element={
-                <ProtectedRoute>
-                  <InterviewResults />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/ats-checker"
-              element={
-                <ProtectedRoute>
-                  <ATSChecker />
-                </ProtectedRoute>
-              }
-            />
-            
-            {/* Catch-all / 404 */}
+            {/* Accounts were removed; keep old links working. */}
+            <Route path="/login" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/signup" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
+          </RouteBoundary>
         </BrowserRouter>
       </TooltipProvider>
     </ThemeProvider>

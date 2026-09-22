@@ -2,33 +2,11 @@ import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowRight, CheckCircle, Star, StarHalf } from "lucide-react";
+import { ArrowRight, CheckCircle, Star } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import Header from "@/components/Header";
+import Header, { Footer } from "@/components/Header";
+import WhyChoose from "@/components/WhyChoose";
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
-
-const features = [
-  {
-    iconUrl: "https://img.icons8.com/fluency/48/000000/artificial-intelligence.png",
-    title: "AI-Powered Analysis",
-    description: "Advanced gesture recognition and behavioral analysis during interviews"
-  },
-  {
-    iconUrl: "https://img.icons8.com/fluency/48/000000/video-call.png",
-    title: "Real-time Monitoring",
-    description: "Live webcam feed with instant feedback on posture and attention"
-  },
-  {
-    iconUrl: "https://img.icons8.com/fluency/48/000000/lock-2.png",
-    title: "Secure & Private",
-    description: "End-to-end encryption with no data storage on our servers"
-  },
-  {
-    iconUrl: "https://img.icons8.com/fluency/48/000000/lightning-bolt.png",
-    title: "Instant Results",
-    description: "Get detailed reports and improvement suggestions immediately"
-  }
-];
 
 const stats = [
   { value: "10K+", label: "Interviews Conducted" },
@@ -95,7 +73,7 @@ const feedbacks = [
       "Personalized technical and HR questions made preparation focused. The feedback report strengthened my communication skills."
   },
   {
-    name: "Aayushi Shrivastava",
+    name: "Aayushi Jha",
     role: "Backend Engineer",
     avatar: "/avatars/Aayushi.jpg",
     text:
@@ -399,7 +377,7 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-background">
-      <Header showProfile={false} />
+      <Header />
       
       <section className="relative overflow-hidden">
         <div 
@@ -447,19 +425,19 @@ const Index = () => {
             >
               <Button 
                 size="lg"
-                onClick={() => navigate("/signup")}
+                onClick={() => navigate("/resume-upload")}
                 className="bg-primary-foreground text-primary hover:bg-primary-foreground/90 shadow-glow px-8 py-4 text-lg"
               >
-                Start Free Trial
+                Start Mock Interview
                 <ArrowRight className="h-5 w-5 ml-2" />
               </Button>
               <Button 
                 variant="secondary" 
                 size="lg"
-                onClick={() => navigate("/login")}
+                onClick={() => navigate("/ats-checker")}
                 className="bg-white/20 backdrop-blur-sm text-white border-white/30 hover:bg-white/30 px-8 py-4 text-lg"
               >
-                Sign In
+                Check Resume Score
               </Button>
             </motion.div>
           </motion.div>
@@ -504,46 +482,7 @@ const Index = () => {
         </div>
       </section>
 
-      <section className="py-20">
-        <div className="container mx-auto px-6">
-          <motion.div
-            initial={{ opacity: 0, y: 30 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.6 }}
-            className="text-center mb-16"
-          >
-            <Badge variant="secondary" className="mb-4">Features</Badge>
-            <h2 className="text-4xl font-bold mb-4">Why Choose Our Platform?</h2>
-            <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
-              Experience the most advanced AI interview platform with cutting-edge technology
-              and personalized feedback.
-            </p>
-          </motion.div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
-            {features.map((feature, index) => (
-              <motion.div
-                key={feature.title}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: index * 0.1, duration: 0.6 }}
-              >
-                <Card className="h-full hover:shadow-primary transition-all duration-300 hover:scale-105">
-                  <CardContent className="p-6 text-center">
-                    <div className="w-12 h-12 bg-gradient-primary rounded-lg flex items-center justify-center mx-auto mb-4">
-                      <img src={feature.iconUrl} alt={feature.title} className="h-6 w-6" />
-                    </div>
-                    <h3 className="font-semibold text-lg mb-2">{feature.title}</h3>
-                    <p className="text-muted-foreground">{feature.description}</p>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
+      <WhyChoose />
 
       {/* Founder Vlog Section */}
       <section className="py-20 container mx-auto px-6">
@@ -627,7 +566,7 @@ const Index = () => {
             <div className="flex flex-col sm:flex-row items-center justify-center space-y-4 sm:space-y-0 sm:space-x-4">
               <Button 
                 size="lg"
-                onClick={() => navigate("/signup")}
+                onClick={() => navigate("/resume-upload")}
                 className="bg-primary-foreground text-primary hover:bg-primary-foreground/90 px-8 py-4 text-lg"
               >
                 Get Started Now
@@ -635,18 +574,14 @@ const Index = () => {
               </Button>
               <div className="flex items-center space-x-2 text-sm opacity-75">
                 <CheckCircle className="h-4 w-4" />
-                <span>No credit card required</span>
+                <span>No sign-up required</span>
               </div>
             </div>
           </motion.div>
         </div>
       </section>
 
-      <footer className="border-t border-border py-8">
-        <div className="container mx-auto px-6 text-center text-muted-foreground">
-          <p>&copy; 2024 AI Interview Platform. All rights reserved.</p>
-        </div>
-      </footer>
+      <Footer />
     </div>
   );
 };

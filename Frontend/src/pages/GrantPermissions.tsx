@@ -1,116 +1,208 @@
-// src/pages/GrantPermissions.tsx
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Card, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { motion } from 'framer-motion';
-import { useToast } from '@/hooks/use-toast';
-import { safeFetch } from '@/lib/api';
-import { Home } from 'lucide-react';
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { Camera, CameraOff, Mic, MicOff } from "lucide-react";
+import Header from "@/components/Header";
+import { FlowSteps } from "@/components/bits";
+import { Button } from "@/components/ui/button";
+import { loadInterview, saveInterview } from "@/lib/profile";
+import type { InterviewSession } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
-const GrantPermissions: React.FC = () => {
+type DeviceState = "idle" | "ok" | "denied";
+
+export default function GrantPermissions() {
   const navigate = useNavigate();
-  const { toast } = useToast();
-  const [loading, setLoading] = useState(false);
-  const [sessionExists, setSessionExists] = useState(true);
+  const session = loadInterview<InterviewSession & { devices?: { camera: boolean; mic: boolean } }>();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [camera, setCamera] = useState<DeviceState>("idle");
+  const [mic, setMic] = useState<DeviceState>("idle");
+  const [level, setLevel] = useState(0);
+  const [requesting, setRequesting] = useState(false);
 
   useEffect(() => {
-    const stored = localStorage.getItem('interview_session');
-    if (!stored) {
-      setSessionExists(false);
-      toast({
-        title: "No session found",
-        description: "Please upload your resume first.",
-        variant: "destructive"
-      });
-      navigate('/resume-upload');
-    }
-  }, [navigate, toast]);
+    if (!session) navigate("/resume-upload", { replace: true });
+    return () => streamRef.current?.getTracks().forEach((t) => t.stop());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const requestPermissions = async () => {
-    setLoading(true);
+  // Microphone level meter so the candidate can confirm the right input is selected.
+  useEffect(() => {
+    if (mic !== "ok" || !streamRef.current) return;
+    const ctx = new AudioContext();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    ctx.createMediaStreamSource(streamRef.current).connect(analyser);
+    const data = new Uint8Array(analyser.fftSize);
+    let raf = 0;
+    const tick = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const v of data) sum += ((v - 128) / 128) ** 2;
+      setLevel(Math.min(1, Math.sqrt(sum / data.length) * 4));
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => {
+      cancelAnimationFrame(raf);
+      ctx.close();
+    };
+  }, [mic]);
+
+  const request = async () => {
+    setRequesting(true);
+    const tracks: MediaStreamTrack[] = [];
     try {
-      // ask for both mic and camera
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-
-      // If we got here, permissions are granted
-      // Stop tracks immediately — we only needed permission
-      try {
-        stream.getTracks().forEach((t) => t.stop());
-      } catch {}
-
-      // Update localStorage interview_session object
-      const raw = localStorage.getItem('interview_session');
-      if (!raw) throw new Error('Session missing. Please upload resume first.');
-
-      const session = JSON.parse(raw);
-      session.permissions = { mic: true, camera: true };
-      session.permissions_granted = true;
-      localStorage.setItem('interview_session', JSON.stringify(session));
-
-      toast({ title: 'Permissions granted', description: 'Microphone & camera access granted.' });
-
-      // Optionally start server-side monitoring early (non-blocking)
-      try {
-        await safeFetch('/api/start-monitoring', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: session.session_id, duration: 180 })
-        });
-        console.log('✅ Server-side monitoring requested.');
-      } catch (e) {
-        // Not fatal — interview can proceed without it
-        console.warn('Could not start server monitoring yet:', e);
-      }
-
-      // Navigate to interview page
-      setTimeout(() => navigate('/interview'), 600);
-    } catch (err) {
-      console.error('Permission error:', err);
-      toast({
-        title: "Permissions required",
-        description: "Please allow microphone and camera access to continue.",
-        variant: "destructive"
-      });
-    } finally {
-      setLoading(false);
+      const v = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      tracks.push(...v.getVideoTracks());
+      setCamera("ok");
+    } catch {
+      setCamera("denied");
     }
+    try {
+      const a = await navigator.mediaDevices.getUserMedia({ audio: true });
+      tracks.push(...a.getAudioTracks());
+      setMic("ok");
+    } catch {
+      setMic("denied");
+    }
+    streamRef.current = new MediaStream(tracks);
+    if (videoRef.current) videoRef.current.srcObject = streamRef.current;
+    setRequesting(false);
   };
 
-  if (!sessionExists) return null;
+  const begin = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    if (session) saveInterview({ ...session, devices: { camera: camera === "ok", mic: mic === "ok" } });
+    navigate("/interview");
+  };
+
+  if (!session) return null;
+  const checked = camera !== "idle" || mic !== "idle";
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-2xl w-full">
-        <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-          <Card>
-            <CardContent className="p-8 text-center">
-              <h2 className="text-2xl font-bold mb-4">Grant Microphone & Camera Access</h2>
-              <p className="text-muted-foreground mb-6">
-                We need permission to access your microphone and camera to record your answers and monitor interview behaviour for coaching feedback.
-                Your data is processed securely and temporary media files will be deleted after processing.
-              </p>
+    <div className="min-h-screen">
+      <Header />
+      <main className="container max-w-4xl py-10">
+        <FlowSteps current={1} />
 
-              <div className="flex items-center justify-center gap-4">
-                <Button onClick={requestPermissions} disabled={loading}>
-                  {loading ? 'Requesting...' : 'Allow Microphone & Camera'}
-                </Button>
+        <div className="mt-10 grid gap-10 md:grid-cols-[1fr_1fr]">
+          <div>
+            <p className="eyebrow mb-3">Step 2</p>
+            <h1 className="display text-4xl sm:text-5xl">Check your camera and microphone</h1>
+            <p className="mt-3 text-muted-foreground">
+              Your microphone records spoken answers. Your camera is used to report on eye contact, posture and focus.
+              Video is analysed frame by frame on the server and never recorded.
+            </p>
 
-                <Button variant="outline" onClick={() => navigate('/resume-upload')} disabled={loading}>
-                  Back
-                </Button>
+            <ul className="mt-8 divide-y rounded-md border bg-card">
+              <DeviceRow
+                icon={camera === "denied" ? CameraOff : Camera}
+                label="Camera"
+                state={camera}
+                okText="Working"
+                deniedText="Blocked. Allow it from the address bar to get an activity report."
+              />
+              <DeviceRow
+                icon={mic === "denied" ? MicOff : Mic}
+                label="Microphone"
+                state={mic}
+                okText="Working, try speaking"
+                deniedText="Blocked. You can still type your answers."
+              >
+                {mic === "ok" && (
+                  <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted">
+                    <div className="h-full bg-success transition-[width] duration-75" style={{ width: `${level * 100}%` }} />
+                  </div>
+                )}
+              </DeviceRow>
+            </ul>
 
-                <Button variant="ghost" onClick={() => navigate('/dashboard')} disabled={loading}>
-                  <Home className="h-4 w-4 mr-2" />
-                  Home
+            <div className="mt-6 rounded-md border bg-card p-4 text-sm">
+              <p className="font-medium">Before you begin</p>
+              <ul className="mt-2 space-y-1.5 text-muted-foreground">
+                <li>· Five questions. There is no time limit, but aim for about two minutes per answer.</li>
+                <li>· Stay on this tab. Switching tabs is logged, and the third switch ends the interview.</li>
+                <li>· Sit facing a light source with your head and shoulders in frame.</li>
+              </ul>
+            </div>
+
+            <div className="mt-8 flex flex-wrap items-center gap-3">
+              {!checked ? (
+                <Button size="lg" onClick={request} disabled={requesting}>
+                  {requesting ? "Waiting for permission…" : "Allow camera & microphone"}
                 </Button>
+              ) : (
+                <Button size="lg" onClick={begin}>
+                  Begin interview
+                </Button>
+              )}
+              {!checked && (
+                <button onClick={begin} className="text-sm text-muted-foreground hover:text-foreground">
+                  Skip. I'll type my answers
+                </button>
+              )}
+              <Link to="/resume-upload" className="ml-auto text-sm text-muted-foreground hover:text-foreground">
+                Use a different resume
+              </Link>
+            </div>
+          </div>
+
+          <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted md:mt-14">
+            <video ref={videoRef} autoPlay playsInline muted className="h-full w-full scale-x-[-1] object-cover" />
+            {camera !== "ok" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center text-muted-foreground">
+                <Camera className="h-6 w-6" />
+                <p className="mt-3 text-sm">{camera === "denied" ? "Camera unavailable" : "Preview appears here"}</p>
               </div>
-            </CardContent>
-          </Card>
-        </motion.div>
-      </div>
+            )}
+            {camera === "ok" && (
+              <div className="pointer-events-none absolute inset-x-[22%] inset-y-[12%] rounded-[45%] border border-dashed border-white/60" aria-hidden />
+            )}
+          </div>
+        </div>
+      </main>
     </div>
   );
-};
+}
 
-export default GrantPermissions;
+function DeviceRow({
+  icon: Icon,
+  label,
+  state,
+  okText,
+  deniedText,
+  children,
+}: {
+  icon: React.ElementType;
+  label: string;
+  state: DeviceState;
+  okText: string;
+  deniedText: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <li className="flex gap-3 px-4 py-3.5">
+      <Icon className={cn("mt-0.5 h-4 w-4", state === "denied" ? "text-destructive" : "text-muted-foreground")} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">{label}</p>
+          <span
+            className={cn(
+              "text-xs",
+              state === "ok" && "text-success",
+              state === "denied" && "text-destructive",
+              state === "idle" && "text-muted-foreground",
+            )}
+          >
+            {state === "ok" ? "Ready" : state === "denied" ? "Blocked" : "Not checked"}
+          </span>
+        </div>
+        {state !== "idle" && (
+          <p className="mt-0.5 text-xs text-muted-foreground">{state === "ok" ? okText : deniedText}</p>
+        )}
+        {children}
+      </div>
+    </li>
+  );
+}

@@ -1,0 +1,19 @@
+# --- Web ---
+flask
+flask-cors
+gunicorn
+python-dotenv
+requests
+
+# --- Resume parsing + reports ---
+PyMuPDF
+reportlab
+matplotlib
+
+# --- Speech-to-text (needs ffmpeg on PATH) ---
+openai-whisper
+
+# --- Activity monitoring ---
+opencv-python-headless
+mediapipe==0.10.14
+numpy

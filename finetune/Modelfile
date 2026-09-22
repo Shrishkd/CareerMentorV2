@@ -1,0 +1,17 @@
+# Load the fine-tuned model into Ollama:
+#   ollama create career-mentor -f finetune/Modelfile
+# then set LLM_MODEL=career-mentor in Backend/.env and restart the backend.
+#
+# Update the filename below to match the .gguf produced by train_qlora.py.
+FROM ./career-mentor-qwen3-4b.Q4_K_M.gguf
+
+PARAMETER temperature 0.3
+PARAMETER num_ctx 4096
+PARAMETER stop "<|im_end|>"
+
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""

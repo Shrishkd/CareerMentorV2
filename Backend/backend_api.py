@@ -1,786 +1,585 @@
-import os
-import uuid
 import json
+import os
+import queue
+import re
+import sys
+import threading
+import uuid
 from datetime import datetime
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
-import exp2
-import livevid1
-import shutil
-from supabase import create_client
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_BUCKET_REPORTS = os.getenv("SUPABASE_BUCKET_REPORTS", "careerMentor")
-USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
+from dotenv import load_dotenv
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if USE_SUPABASE else None
+load_dotenv()
 
-def store_report_and_get_url(local_path: str, session_id: str):
-    if not USE_SUPABASE:
-        return {"storage": "local", "path": local_path, "url": None}
+# Windows consoles default to cp1252; never let a log line crash a request.
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(errors="replace")
+    except Exception:
+        pass
 
-    storage_key = f"{session_id}/{os.path.basename(local_path)}"
+from flask import Flask, jsonify, request, send_file  # noqa: E402
+from flask_cors import CORS  # noqa: E402
+from werkzeug.utils import secure_filename  # noqa: E402
 
-    with open(local_path, "rb") as f:
-        bucket = supabase.storage.from_(SUPABASE_BUCKET_REPORTS)
+import interview_engine  # noqa: E402
+import llm  # noqa: E402
+import monitoring  # noqa: E402
+import reports  # noqa: E402
+import resume_analyzer  # noqa: E402
+import speech  # noqa: E402
 
-        try:
-            bucket.remove([storage_key])
-        except:
-            pass
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, os.pardir))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+SESSION_DIR = os.path.join(DATA_DIR, "sessions")
+STATS_DIR = DATA_DIR
+for d in (UPLOAD_DIR, SESSION_DIR):
+    os.makedirs(d, exist_ok=True)
 
-        bucket.upload(storage_key, f, {"content-type": "application/pdf"})
-
-
-    signed = supabase.storage.from_(SUPABASE_BUCKET_REPORTS).create_signed_url(
-        storage_key,
-        60 * 60 * 24 * 7,  # 7 days
-    )
-
-    return {
-        "storage": "supabase",
-        "path": storage_key,
-        "url": signed["signedURL"],
-    }
-
-
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))             # .../Backend
-PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, os.pardir)) # repo root
-
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads") #keep uploads inside Backend
-REPORTS_DIR = os.path.abspath(os.path.join(PROJECT_ROOT, "reports")) # write PDFs to repo-level /reports
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(REPORTS_DIR, exist_ok=True)
-
+ALLOWED_RESUME = {".pdf", ".docx"}
+USER_ID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024
 CORS(app, resources={r"/api/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}})
 
 
+# ---------------------------------------------------------------------------
+# Session store: in memory, mirrored to disk so restarts and multiple workers
+# don't lose interviews.
+# ---------------------------------------------------------------------------
+
+class SessionStore:
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._cache = {}
+
+    def _path(self, sid):
+        return os.path.join(SESSION_DIR, f"{sid}.json")
+
+    def create(self, data):
+        with self._lock:
+            self._cache[data["session_id"]] = data
+            self._write(data)
+        return data
+
+    def get(self, sid):
+        if not sid or not re.fullmatch(r"[0-9a-f-]{36}", str(sid)):
+            return None
+        with self._lock:
+            if sid not in self._cache and os.path.exists(self._path(sid)):
+                with open(self._path(sid), encoding="utf-8") as f:
+                    self._cache[sid] = json.load(f)
+            return self._cache.get(sid)
+
+    def update(self, sid, fn):
+        with self._lock:
+            s = self.get(sid)
+            if s is None:
+                return None
+            fn(s)
+            self._write(s)
+            return s
+
+    def _write(self, s):
+        tmp = self._path(s["session_id"]) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(s, f, ensure_ascii=False)
+        os.replace(tmp, self._path(s["session_id"]))
+
+
+store = SessionStore()
+
+
+def _error(message, code=400):
+    return jsonify({"error": message}), code
+
+
+def _session_or_404(sid):
+    s = store.get(sid)
+    if s is None:
+        raise LookupError("Interview session not found. It may have expired; please upload your resume again.")
+    return s
+
+
+@app.errorhandler(LookupError)
+def _lookup_error(e):
+    return _error(str(e), 404)
+
+
+@app.errorhandler(413)
+def _too_large(_):
+    return _error("File is too large (max 15 MB).", 413)
+
+
+# ---------------------------------------------------------------------------
+# Background grading queue. One worker keeps the CPU free for the model.
+# ---------------------------------------------------------------------------
+
+jobs = queue.Queue()
+
+
+def _grade_worker():
+    while True:
+        sid, idx = jobs.get()
+        try:
+            _grade(sid, idx)
+        except Exception as e:
+            print(f"[queue] job {sid}:{idx} crashed: {e}")
+        finally:
+            jobs.task_done()
+
+
+def _grade(sid, idx):
+    s = store.get(sid)
+    if s is None:
+        return
+    item = s["answers"][idx]
+    if item is None:
+        return
+    store.update(sid, lambda s: s["status"].__setitem__(idx, "processing"))
+
+    q = s["questions"][idx]
+    text = item.get("text", "")
+    if item.get("audio_path"):
+        try:
+            text = speech.transcribe(item["audio_path"])
+        except Exception as e:
+            print(f"[queue] transcription failed: {e}")
+            text = ""
+            item["error"] = str(e)
+        finally:
+            try:
+                os.remove(item["audio_path"])
+            except OSError:
+                pass
+
+    evaluation = interview_engine.evaluate_answer(q["question"], text, q.get("type", "theory"),
+                                                  s.get("resume_text", "")[:600])
+    if item.get("error") and not text:
+        evaluation["weaknesses"] = [item["error"]]
+        evaluation["detailed_feedback"] = item["error"]
+
+    def apply(s):
+        s["answers"][idx] = {"text": text, "type": item.get("type"), "error": item.get("error")}
+        s["evaluations"][idx] = evaluation
+        s["status"][idx] = "done"
+    store.update(sid, apply)
+
+
+threading.Thread(target=_grade_worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
 @app.route("/api/healthz", methods=["GET"])
 def health():
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "llm": llm.status(), "speech": speech.status(),
+                    "monitoring": monitoring.MP_AVAILABLE, "queue": jobs.qsize()})
 
-# In-memory session storage
-active_sessions = {}
 
-# Save uploaded file
-def save_uploaded_file(file_storage, folder, filename):
-    out_path = os.path.join(folder, filename)
-    file_storage.save(out_path)
-    return out_path
+# ---------------------------------------------------------------------------
+# Resume upload -> session (+ questions for interviews)
+# ---------------------------------------------------------------------------
 
-# Helper: ensure evaluation is a dict (normalize string -> try JSON -> fallback dict)
-def normalize_evaluation(eval_obj, fallback_note="Evaluation fallback used"):
-    # if already dict, return
-    if isinstance(eval_obj, dict):
-        return eval_obj
-    # if it's JSON string -> try parse
-    if isinstance(eval_obj, str):
-        s = eval_obj.strip()
-        if not s:
-            return {
-            "overall_score": 50,
-            "category_scores": {},
-            "strengths": [],
-            "weaknesses": ["No evaluation returned"],
-            "detailed_feedback": fallback_note,
-            "detailed_explanation": "No evaluation text returned from model.",
-            "improvement_suggestions": [],
-            "interviewer_notes": "",
-            "follow_up_questions": []
-        }
-        try:
-            parsed = json.loads(s)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            # not JSON, continue to fallback below
-            pass
-
-        # fallback: wrap string into feedback
-        return {
-    "overall_score": 50,
-    "category_scores": {},
-    "strengths": [],
-    "weaknesses": ["No evaluation returned"],
-    "detailed_feedback": fallback_note,
-    "detailed_explanation": "No evaluation text returned from model.",
-    "improvement_suggestions": [],
-    "interviewer_notes": "",
-    "follow_up_questions": []
-        }
-
-    # any other type -> convert to string fallback
-    try:
-        txt = str(eval_obj)
-    except Exception:
-        txt = "Unknown evaluation format"
-    return {
-        "overall_score": 50,
-    "category_scores": {},
-    "strengths": [],
-    "weaknesses": ["No evaluation returned"],
-    "detailed_feedback": fallback_note,
-    "detailed_explanation": "No evaluation text returned from model.",
-    "improvement_suggestions": [],
-    "interviewer_notes": "",
-    "follow_up_questions": []
-    }
-
-# =========================
-# Endpoint: upload resume
-# =========================
 @app.route("/api/upload-resume", methods=["POST"])
 def upload_resume():
-    try:
-        if "resume" not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
-        resume_file = request.files["resume"]
-        out_path = save_uploaded_file(resume_file, UPLOAD_DIR, f"{uuid.uuid4()}_{resume_file.filename}")
+    f = request.files.get("resume")
+    if not f or not f.filename:
+        return _error("No file uploaded.")
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in ALLOWED_RESUME:
+        return _error("Please upload a PDF or DOCX file.")
 
-        # Extract text
-        try:
-            resume_text = exp2.extract_text_from_pdf(str(out_path))
-        except Exception as e:
-            print("⚠️ extract_text_from_pdf failed:", e)
-            resume_text = ""
+    purpose = request.form.get("purpose", "interview")
+    user_id = request.form.get("user_id") or None
+    candidate_name = (request.form.get("name") or "").strip()[:80] or None
 
-        # Generate questions
-        try:
-            q_text = exp2.generate_questions_from_resume(resume_text)
-            questions = exp2.parse_questions_properly(q_text)
-            if not questions:
-                questions = [
-                    "Tell me about yourself",
-                    "Describe a project you built",
-                    "Explain a technical challenge you solved"
-                ]
-        except Exception as e:
-            print("⚠️ Question generation failed:", e)
-            questions = [
-                "Tell me about yourself",
-                "Describe a project you built",
-                "Explain a technical challenge you solved"
-            ]
+    sid = str(uuid.uuid4())
+    path = os.path.join(UPLOAD_DIR, f"{sid}_{secure_filename(f.filename) or 'resume' + ext}")
+    f.save(path)
 
-        session_id = str(uuid.uuid4())
-        active_sessions[session_id] = {
-            "session_id": session_id,
-            "created_at": datetime.utcnow().isoformat(),
-            "resume_path": str(out_path),
-            "resume_text": resume_text,
-            "questions": questions,
-            "answers": [],
-            "evaluations": [],
-            "monitoring": None,
-            "report_path": None
-        }
+    extracted = resume_analyzer.extract_resume(path)
+    if purpose == "interview" and not extracted["extractable"]:
+        return _error("We couldn't read any text from this file. It may be a scanned image. "
+                      "Export your resume as a text-based PDF and try again.", 422)
 
-        return jsonify({
-            "session_id": session_id,
-            "questions": questions,
-            "question_count": len(questions)
-        })
-    except Exception as e:
-        print("❌ upload-resume error:", e)
-        return jsonify({"error": str(e)}), 500
+    profile = resume_analyzer.parse_resume(extracted["text"], extracted["links"], extracted["pages"])
+    session = {
+        "session_id": sid,
+        "created_at": datetime.utcnow().isoformat(),
+        "purpose": purpose,
+        "user_id": user_id if user_id and USER_ID_RE.match(user_id) else None,
+        "candidate_name": candidate_name or profile.get("name"),
+        "resume_path": path,
+        "resume_text": extracted["text"],
+        "resume_links": extracted["links"],
+        "resume_pages": extracted["pages"],
+        "resume_extractable": extracted["extractable"],
+        "skills": profile["skills_flat"],
+        "questions": [],
+        "answers": [],
+        "evaluations": [],
+        "status": [],
+        "tab_events": [],
+        "model": llm.LLM_MODEL,
+    }
 
-# =========================
-# Endpoint: submit answer
-# =========================
+    if purpose == "interview":
+        questions, generated = interview_engine.generate_questions(extracted["text"], profile)
+        n = len(questions)
+        session.update({"questions": questions, "answers": [None] * n, "evaluations": [None] * n,
+                        "status": ["pending"] * n, "llm_questions": generated})
+
+    store.create(session)
+    return jsonify({
+        "session_id": sid,
+        "questions": session["questions"],
+        "question_count": len(session["questions"]),
+        "candidate_name": session["candidate_name"],
+        "skills": profile["skills_flat"][:20],
+        "llm_generated": session.get("llm_questions", False),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Answers
+# ---------------------------------------------------------------------------
+
 @app.route("/api/submit-answer", methods=["POST"])
 def submit_answer():
-    """
-    Accepts either:
-    - JSON: { session_id, question_index, answer, type: "text"|"code" }
-    - multipart/form-data: session_id, question_index, audio=file
-    """
+    """JSON {session_id, question_index, answer, type} or multipart with an `audio` file."""
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        audio = None
+    else:
+        data = request.form
+        audio = request.files.get("audio")
+
+    s = _session_or_404(data.get("session_id"))
     try:
-        # JSON path (text/code)
-        if request.is_json:
-            data = request.get_json()
-            session_id = data.get("session_id")
-            try:
-                q_idx = int(data.get("question_index", 0))
-            except Exception:
-                q_idx = 0
-            answer = data.get("answer", "") or ""
-            ans_type = data.get("type", "text")
+        idx = int(data.get("question_index"))
+    except (TypeError, ValueError):
+        return _error("question_index is required.")
+    if not 0 <= idx < len(s["questions"]):
+        return _error("Invalid question_index.")
+    if s.get("finished"):
+        return _error("This interview has already been submitted.", 409)
 
-            if not session_id or session_id not in active_sessions:
-                return jsonify({"error": "Invalid or missing session_id"}), 400
+    if audio is not None:
+        ext = os.path.splitext(audio.filename or "")[1].lower() or ".webm"
+        audio_path = os.path.join(UPLOAD_DIR, f"{s['session_id']}_q{idx}_{uuid.uuid4().hex[:8]}{ext}")
+        audio.save(audio_path)
+        item = {"audio_path": audio_path, "type": "voice"}
+    else:
+        item = {"text": str(data.get("answer") or ""), "type": data.get("type", "text")}
 
-            session = active_sessions[session_id]
+    def apply(s):
+        s["answers"][idx] = item
+        s["evaluations"][idx] = None
+        s["status"][idx] = "queued"
+    store.update(s["session_id"], apply)
+    jobs.put((s["session_id"], idx))
+    return jsonify({"status": "queued", "question_index": idx, "queue_position": jobs.qsize()})
 
-            # validate question index
-            questions = session.get("questions", [])
-            if q_idx < 0 or q_idx >= len(questions):
-                return jsonify({"error": "Invalid question_index"}), 400
 
-            question = questions[q_idx]
-            resume_ctx = session.get("resume_text", "")
+def _progress(s):
+    total = len(s["questions"])
+    done = sum(1 for st in s["status"] if st in ("done", "skipped"))
+    return {"done": done, "total": total, "status": s["status"]}
 
-            # Route to code evaluator or normal evaluator
-            if ans_type == "code":
-                try:
-                    eval_result = exp2.evaluate_code_answer(question, answer, resume_ctx)
-                except Exception as e:
-                    print("⚠️ evaluate_code_answer failed:", e)
-                    # fallback: try enhanced_evaluate_answer or wrap fallback
-                    try:
-                        eval_result = exp2.enhanced_evaluate_answer(question, answer, resume_ctx)
-                    except Exception as e2:
-                        print("⚠️ fallback evaluator also failed:", e2)
-                        eval_result = {
-                            "overall_score": 50,
-                            "category_scores": {},
-                            "strengths": [],
-                            "weaknesses": ["Evaluation failed"],
-                            "detailed_feedback": str(e2)
-                        }
-            else:
-                try:
-                    eval_result = exp2.enhanced_evaluate_answer(question, answer, resume_ctx)
-                except Exception as e:
-                    print("⚠️ enhanced_evaluate_answer failed:", e)
-                    try:
-                        eval_result = exp2.evaluate_answer(answer)
-                    except Exception as e2:
-                        print("⚠️ evaluate_answer fallback failed:", e2)
-                        eval_result = {
-                            "overall_score": 50,
-                            "category_scores": {},
-                            "strengths": [],
-                            "weaknesses": ["Evaluation failed"],
-                            "detailed_feedback": str(e2)
-                        }
 
-            # Normalize evaluation to dict (safety)
-            eval_result = normalize_evaluation(eval_result)
+@app.route("/api/session/<sid>", methods=["GET"])
+def session_status(sid):
+    s = _session_or_404(sid)
+    return jsonify({"session_id": sid, "questions": s["questions"], "finished": bool(s.get("finished")),
+                    "report_ready": bool(s.get("report_path")), **_progress(s)})
 
-            # store
-            session["answers"].append(answer)
-            session["evaluations"].append(eval_result)
 
-            return jsonify({
-                "transcript": answer,
-                "evaluation": eval_result
-            })
+# ---------------------------------------------------------------------------
+# Activity monitoring
+# ---------------------------------------------------------------------------
 
-        # multipart/form-data path (audio upload)
-        else:
-            session_id = request.form.get("session_id")
-            if not session_id or session_id not in active_sessions:
-                return jsonify({"error": "Invalid or missing session_id"}), 400
-
-            try:
-                q_idx = int(request.form.get("question_index", 0))
-            except Exception:
-                q_idx = 0
-
-            session = active_sessions[session_id]
-            questions = session.get("questions", [])
-            if q_idx < 0 or q_idx >= len(questions):
-                return jsonify({"error": "Invalid question_index"}), 400
-
-            if "audio" not in request.files:
-                return jsonify({"error": "No audio uploaded"}), 400
-
-            audio_file = request.files["audio"]
-            out_path = save_uploaded_file(audio_file, UPLOAD_DIR, f"{uuid.uuid4()}_{audio_file.filename}")
-
-            # Transcribe audio (exp2 helper)
-            try:
-                transcript = exp2.transcribe_with_whisper(str(out_path))
-            except Exception as e:
-                print("⚠️ transcribe_with_whisper failed:", e)
-                transcript = ""
-
-            # Evaluate using enhanced evaluator (question context + resume)
-            question = questions[q_idx]
-            resume_ctx = session.get("resume_text", "")
-            try:
-                evaluation = exp2.enhanced_evaluate_answer(question, transcript, resume_ctx)
-            except Exception as e:
-                print("⚠️ enhanced_evaluate_answer failed:", e)
-                try:
-                    evaluation = exp2.evaluate_answer(transcript)
-                except Exception as e2:
-                    print("⚠️ fallback evaluate_answer failed:", e2)
-                    evaluation = {
-                        "overall_score": 0,
-                        "strengths": [],
-                        "weaknesses": ["Evaluation failed"],
-                        "detailed_feedback": str(e2)
-                    }
-
-            # Normalize and store
-            evaluation = normalize_evaluation(evaluation)
-            session["answers"].append(transcript)
-            session["evaluations"].append(evaluation)
-
-            return jsonify({
-                "transcript": transcript,
-                "evaluation": evaluation
-            })
-
-    except Exception as e:
-        print("❌ submit-answer error:", e)
-        return jsonify({"error": str(e)}), 500
-
-# ===========================
-# Endpoint: start monitoring
-# ===========================
-@app.route("/api/start-monitoring", methods=["POST"])
-def start_monitoring():
+@app.route("/api/monitor-frame", methods=["POST"])
+def monitor_frame():
+    s = _session_or_404(request.form.get("session_id"))
+    frame = request.files.get("frame")
+    if frame is None:
+        return _error("No frame provided.")
+    if s.get("finished"):
+        return jsonify({"ignored": True})
     try:
-        data = request.get_json()
-        session_id = data.get("session_id")
-        duration = int(data.get("duration", 180))
-
-        if session_id not in active_sessions:
-            return jsonify({"error": "Invalid session"}), 400
-
-        # Launch monitoring async — returns provisional PDF path
-        provisional_report = livevid1.start_monitoring_async(
-            session_id,
-            duration,
-            REPORTS_DIR
-        )
-
-        # ✅ Correct variable name used below (this was your doubt!)
-        print(f"📷 Monitoring started for session: {session_id}, provisional: {provisional_report}")
-
-        # Store for frontend polling
-        active_sessions[session_id]["monitoring"] = {
-            "duration": duration,
-            "report_path": provisional_report
-        }
-
-        # Return the provisional PDF path so frontend can poll
-        return jsonify({
-            "status": "monitoring started",
-            "provisional_report_path": provisional_report
-        })
-        
-    except Exception as e:
-        print("❌ start-monitoring error:", e)
-        return jsonify({"error": str(e)}), 500
-
-# =================================
-# Endpoint: check monitoring status
-# =================================
-@app.route("/api/check-monitoring-status", methods=["POST"])
-def check_monitoring_status():
-    try:
-        data = request.get_json()
-        session_id = data.get("session_id")
-
-        if session_id not in active_sessions:
-            return jsonify({"error": "Invalid session"}), 400
-
-        session = active_sessions[session_id]
-        m = session.get("monitoring", {})
-
-        provisional_path = m.get("report_path")
-
-        # File is ready
-        if provisional_path and os.path.exists(provisional_path):
-
-            # ⭐ NEW: Upload monitoring report to Supabase
-            upload_info = store_report_and_get_url(provisional_path, session_id)
-
-            session["monitoring_report"] = upload_info  # store cloud info
-
-            return jsonify({
-                "ready": True,
-                "report_path": provisional_path,
-                "cloud_url": upload_info.get("url")
-            })
-
-        return jsonify({"ready": False})
-
-    except Exception as e:
-        print("❌ check-monitoring-status error:", e)
-        return jsonify({"error": str(e)}), 500
+        status = monitoring.get(s["session_id"]).process(frame.read())
+        return jsonify(status)
+    except RuntimeError as e:
+        return _error(str(e), 503)
+    except ValueError as e:
+        return _error(str(e))
 
 
-# =========================
-# Endpoint: ATS check (using Gemini via exp2.analyze_resume_for_ats)
-# =========================
-@app.route("/api/ats-check", methods=["POST"])
-def ats_check():
-    try:
-        data = request.get_json() or {}
-        session_id = data.get("session_id")
-        job_description = data.get("job_description", "")
+@app.route("/api/monitor-event", methods=["POST"])
+def monitor_event():
+    data = request.get_json(silent=True) or {}
+    s = _session_or_404(data.get("session_id"))
+    if data.get("type") == "tab_hidden" and not s.get("finished"):
+        stamp = datetime.now().strftime("%H:%M:%S")
+        store.update(s["session_id"], lambda s: s["tab_events"].append(f"Left the interview tab at {stamp}"))
+    return jsonify({"tab_switches": len(store.get(s["session_id"])["tab_events"])})
 
-        if not session_id or session_id not in active_sessions:
-            return jsonify({"error": "Invalid session_id"}), 400
 
-        session = active_sessions[session_id]
-        resume_text = session.get("resume_text", "")
+# ---------------------------------------------------------------------------
+# Finishing and reports
+# ---------------------------------------------------------------------------
 
-        # Call analyzer in exp2
+_building = set()
+_building_lock = threading.Lock()
+
+
+def _finish(sid):
+    """Mark unanswered questions as skipped and close monitoring. Idempotent."""
+    s = store.get(sid)
+    if s.get("finished"):
+        return
+    summary, evidence = monitoring.finish(sid, s.get("tab_events"))
+    activity_path = None
+    if summary:
         try:
-            ats_result = exp2.analyze_resume_for_ats(resume_text, job_description)
+            activity_path = reports.activity_report(s, summary, evidence)
         except Exception as e:
-            print("⚠️ analyze_resume_for_ats failed:", e)
-            ats_result = {
-                "overallScore": 50,
-                "sections": {
-                    "keywords": {"score": 50, "feedback": []},
-                    "formatting": {"score": 50, "feedback": []},
-                    "experience": {"score": 50, "feedback": []},
-                    "skills": {"score": 50, "feedback": []},
-                },
-                "suggestions": ["Analysis unavailable"]
-            }
+            print(f"[report] activity report failed: {e}")
 
-        # store in session for later report generation
-        session["ats_result"] = ats_result
+    def apply(s):
+        for i, a in enumerate(s["answers"]):
+            if a is None:
+                s["answers"][i] = {"text": "", "type": "skipped"}
+                s["evaluations"][i] = interview_engine.empty_evaluation(
+                    s["questions"][i].get("type", "theory"), "The question was skipped.")
+                s["status"][i] = "skipped"
+        s["finished"] = True
+        s["finished_at"] = datetime.utcnow().isoformat()
+        s["activity_summary"] = summary
+        s["activity_report_path"] = activity_path
+    store.update(sid, apply)
 
-        return jsonify({"ats_result": ats_result})
 
+def _build_report(sid):
+    try:
+        s = store.get(sid)
+        answers = [(a or {}).get("text", "") for a in s["answers"]]
+        fa = interview_engine.final_assessment(s["questions"], answers, s["evaluations"], s.get("activity_summary"))
+        store.update(sid, lambda s: s.__setitem__("final_assessment", fa))
+        s = store.get(sid)
+        path = reports.interview_report({**s, "answers": answers})
+        store.update(sid, lambda s: s.__setitem__("report_path", path))
+        _record_interview(store.get(sid))
     except Exception as e:
-        print("❌ ats-check error:", e)
-        return jsonify({"error": str(e)}), 500
+        print(f"[report] interview report failed: {e}")
+        store.update(sid, lambda s: s.__setitem__("report_error", str(e)))
+    finally:
+        with _building_lock:
+            _building.discard(sid)
 
 
-# =========================
-# Endpoint: generate report
-# =========================
 @app.route("/api/generate-report", methods=["POST"])
 def generate_report():
-    try:
-        data = request.get_json()
-        session_id = data.get("session_id")
-        if session_id not in active_sessions:
-            return jsonify({"error": "Invalid session"}), 400
+    """Finish the interview and poll for the report. Returns ready=false until grading is complete."""
+    data = request.get_json(silent=True) or {}
+    s = _session_or_404(data.get("session_id"))
+    sid = s["session_id"]
+    _finish(sid)
+    s = store.get(sid)
+    progress = _progress(s)
 
-        session = active_sessions[session_id]
-
-        questions = session.get("questions", [])
-        answers = session.get("answers", [])
-        evaluations = session.get("evaluations", [])
-        resume_text = session.get("resume_text", "")
-
-        # ✅ Build a minimal final_assessment dict so PDF has data
-        final_assessment = {
-            "final_recommendation": "Promising candidate, recommended for further rounds.",
-            "confidence_level": 8,
-            "overall_assessment": "The candidate performed well overall. Strengths outweigh weaknesses.",
-            "key_strengths": ["Good technical foundation", "Clear communication"],
-            "development_areas": ["Handle edge cases better", "Optimize code efficiency"],
-            "technical_level": "Intermediate to Advanced",
-            "communication_rating": 8,
-            "problem_solving_rating": 7,
-            "role_fit": "Strong fit for software engineering roles requiring problem-solving.",
-            "next_steps": "Schedule a live technical round for deeper evaluation."
-        }
-
-        # ✅ Save PDF to repo-root /reports folder
-        report_path = exp2.create_comprehensive_report(
-            questions, answers, evaluations, final_assessment, resume_text,
-        )
-
-        if supabase:  # only if Supabase client configured
-            try:
-                storage_key = f"{session_id}/{os.path.basename(report_path)}"
-                with open(report_path, "rb") as f:
-                    supabase.storage.from_(SUPABASE_BUCKET_REPORTS).upload(
-                        storage_key,
-                        f,
-                        {"content-type": "application/pdf"},
-                    )
-                signed = supabase.storage.from_(SUPABASE_BUCKET_REPORTS).create_signed_url(
-                    storage_key,
-                    60 * 60 * 24 * 7,  # 7 days
-                )
-                meta = {
-                    "storage": "supabase",
-                    "path": storage_key,
-                    "url": signed["signedURL"],
-                }
-            except Exception as e:
-                print("⚠️ Supabase upload failed:", e)
-
-
-        session["report_path"] = report_path
-        session["report_meta"] = meta
-
+    if s.get("report_path") and os.path.exists(s["report_path"]):
         return jsonify({
-            "report_path": report_path,
-            "report_url": meta.get("url"),
-            "evaluations": evaluations
+            "ready": True,
+            **progress,
+            "questions": s["questions"],
+            "answers": [(a or {}).get("text", "") for a in s["answers"]],
+            "evaluations": s["evaluations"],
+            "final_assessment": s.get("final_assessment"),
+            "activity_summary": s.get("activity_summary"),
+            "candidate_name": s.get("candidate_name"),
+            "report_url": f"/api/report/{sid}/interview",
+            "activity_report_url": f"/api/report/{sid}/activity" if s.get("activity_report_path") else None,
         })
+    if s.get("report_error"):
+        message = s["report_error"]
+        store.update(sid, lambda s: s.pop("report_error", None))  # allow a retry on the next poll
+        return _error(f"Report generation failed: {message}", 500)
 
-    except Exception as e:
-        print("❌ generate-report error:", e)
-        return jsonify({"error": str(e)}), 500
+    if progress["done"] < progress["total"]:
+        return jsonify({"ready": False, "stage": "grading", **progress})
 
-
-# =========================
-# Endpoint: download report
-# =========================
-@app.route("/api/download-report/<session_id>", methods=["GET"])
-def download_report(session_id):
-    try:
-        if session_id not in active_sessions:
-            return jsonify({"error": "Invalid session"}), 400
-
-        session = active_sessions[session_id]
-        meta = session.get("report_meta") or {}
-        report_path = session.get("report_path")
-
-        # ✅ Prefer Supabase signed URL if available
-        if meta.get("storage") == "supabase" and meta.get("url"):
-            return jsonify({"signed_url": meta["url"]})
-
-        # ✅ Otherwise fall back to local file
-        if not report_path or not os.path.exists(report_path):
-            return jsonify({"error": "Report not found"}), 404
-
-        return send_file(report_path, as_attachment=True)
-
-    except Exception as e:
-        print("❌ download-report error:", e)
-        return jsonify({"error": str(e)}), 500
+    with _building_lock:
+        if sid not in _building:
+            _building.add(sid)
+            threading.Thread(target=_build_report, args=(sid,), daemon=True).start()
+    return jsonify({"ready": False, "stage": "assessment", **progress})
 
 
-# =========================
-# Endpoint: generate ATS report
-# =========================
+@app.route("/api/report/<sid>/<kind>", methods=["GET"])
+def download_report(sid, kind):
+    s = _session_or_404(sid)
+    key = {"interview": "report_path", "activity": "activity_report_path", "ats": "ats_report_path"}.get(kind)
+    if key is None:
+        return _error("Unknown report type.", 404)
+    path = s.get(key)
+    if not path or not os.path.exists(path):
+        return _error("Report not found.", 404)
+    return send_file(path, as_attachment=True, download_name=f"career-mentor-{kind}-report.pdf")
+
+
+# Backwards-compatible download routes.
+@app.route("/api/download-report/<sid>", methods=["GET"])
+def download_report_legacy(sid):
+    return download_report(sid, "interview")
+
+
+@app.route("/api/download-ats-report/<sid>", methods=["GET"])
+def download_ats_legacy(sid):
+    return download_report(sid, "ats")
+
+
+# ---------------------------------------------------------------------------
+# ATS
+# ---------------------------------------------------------------------------
+
+@app.route("/api/ats-check", methods=["POST"])
+def ats_check():
+    data = request.get_json(silent=True) or {}
+    s = _session_or_404(data.get("session_id"))
+    result = resume_analyzer.analyze_resume(
+        s.get("resume_text", ""), data.get("job_description", ""), s.get("resume_links"),
+        s.get("resume_pages", 1), s.get("resume_extractable", True), use_llm=data.get("use_llm", True),
+    )
+    store.update(s["session_id"], lambda s: s.__setitem__("ats_result", result))
+    _record_ats(store.get(s["session_id"]))
+    return jsonify({"ats_result": result})
+
+
 @app.route("/api/generate-ats-report", methods=["POST"])
 def generate_ats_report():
-    try:
-        data = request.get_json()
-        session_id = data.get("session_id")
-        if session_id not in active_sessions:
-            return jsonify({"error": "Invalid session"}), 400
-
-        session = active_sessions[session_id]
-        ats_result = session.get("ats_result")
-        
-        if not ats_result:
-            return jsonify({"error": "No ATS analysis found for this session"}), 400
-
-        resume_text = session.get("resume_text", "")
-
-        # Generate ATS-specific PDF report
-        report_path = exp2.create_ats_report(ats_result, resume_text)
-
-        if not report_path:
-            return jsonify({"error": "Failed to generate ATS report"}), 500
-
-        # Store metadata for download
-        meta = {"storage": "local", "path": report_path, "url": None}
-
-        # Try uploading to Supabase if configured
-        if supabase:
-            try:
-                storage_key = f"{session_id}/ats_{os.path.basename(report_path)}"
-                with open(report_path, "rb") as f:
-                    supabase.storage.from_(SUPABASE_BUCKET_REPORTS).upload(
-                        storage_key,
-                        f,
-                        {"content-type": "application/pdf"},
-                    )
-                signed = supabase.storage.from_(SUPABASE_BUCKET_REPORTS).create_signed_url(
-                    storage_key,
-                    60 * 60 * 24 * 7,  # 7 days
-                )
-                meta = {
-                    "storage": "supabase",
-                    "path": storage_key,
-                    "url": signed["signedURL"],
-                }
-            except Exception as e:
-                print("⚠️ Supabase upload failed for ATS report:", e)
-
-        session["ats_report_path"] = report_path
-        session["ats_report_meta"] = meta
-
-        return jsonify({
-            "report_path": report_path,
-            "report_url": meta.get("url"),
-            "ats_result": ats_result
-        })
-
-    except Exception as e:
-        print("❌ generate-ats-report error:", e)
-        return jsonify({"error": str(e)}), 500
+    data = request.get_json(silent=True) or {}
+    s = _session_or_404(data.get("session_id"))
+    if not s.get("ats_result"):
+        return _error("Run the resume analysis first.")
+    path = reports.ats_report(s["ats_result"], s["session_id"])
+    store.update(s["session_id"], lambda s: s.__setitem__("ats_report_path", path))
+    return jsonify({"report_url": f"/api/report/{s['session_id']}/ats"})
 
 
-# =========================
-# Endpoint: download ATS report
-# =========================
-@app.route("/api/download-ats-report/<session_id>", methods=["GET"])
-def download_ats_report(session_id):
-    try:
-        if session_id not in active_sessions:
-            return jsonify({"error": "Invalid session"}), 400
+# ---------------------------------------------------------------------------
+# Local profile stats (no accounts: the browser keeps an anonymous id)
+# ---------------------------------------------------------------------------
 
-        session = active_sessions[session_id]
-        meta = session.get("ats_report_meta") or {}
-        report_path = session.get("ats_report_path")
-
-        # ✅ Prefer Supabase signed URL if available
-        if meta.get("storage") == "supabase" and meta.get("url"):
-            return jsonify({"signed_url": meta["url"]})
-
-        # ✅ Otherwise fall back to local file
-        if not report_path or not os.path.exists(report_path):
-            return jsonify({"error": "ATS report not found"}), 404
-
-        return send_file(report_path, as_attachment=True, download_name=f"ats_report_{session_id}.pdf")
-
-    except Exception as e:
-        print("❌ download-ats-report error:", e)
-        return jsonify({"error": str(e)}), 500
-
-# =========================
-# Endpoint: save interview result
-# =========================
-@app.route("/api/save-interview-result", methods=["POST"])
-def save_interview_result():
-    try:
-        data = request.get_json()
-        user_id = data.get("user_id")
-        session_id = data.get("session_id")
-        interview_score = data.get("overall_score", 0)
-        questions_count = data.get("questions_count", 0)
-        
-        if not user_id:
-            return jsonify({"error": "user_id required"}), 400
-        
-        # Initialize user stats file if doesn't exist
-        stats_dir = os.path.join(PROJECT_ROOT, "data")
-        os.makedirs(stats_dir, exist_ok=True)
-        stats_file = os.path.join(stats_dir, f"user_{user_id}_stats.json")
-        
-        # Load existing stats
-        if os.path.exists(stats_file):
-            with open(stats_file, "r") as f:
-                user_stats = json.load(f)
-        else:
-            user_stats = {
-                "user_id": user_id,
-                "interviews_completed": 0,
-                "average_score": 0,
-                "total_score": 0,
-                "ats_score": 0,
-                "recent_interviews": []
-            }
-        
-        # Update stats
-        user_stats["interviews_completed"] += 1
-        user_stats["total_score"] += interview_score
-        user_stats["average_score"] = round(user_stats["total_score"] / user_stats["interviews_completed"], 2)
-        
-        # Add to recent interviews (keep last 10)
-        interview_entry = {
-            "date": datetime.utcnow().isoformat(),
-            "score": interview_score,
-            "questions": questions_count,
-            "session_id": session_id,
-            "position": "Practice Interview",
-            "status": "completed"
-        }
-        user_stats["recent_interviews"].insert(0, interview_entry)
-        user_stats["recent_interviews"] = user_stats["recent_interviews"][:10]
-        
-        # Save stats
-        with open(stats_file, "w") as f:
-            json.dump(user_stats, f, indent=2)
-        
-        print(f"✅ Interview result saved for user {user_id}")
-        return jsonify({"status": "success", "stats": user_stats})
-
-    except Exception as e:
-        print("❌ save-interview-result error:", e)
-        return jsonify({"error": str(e)}), 500
+_stats_lock = threading.Lock()
 
 
-# =========================
-# Endpoint: save ATS result
-# =========================
-@app.route("/api/save-ats-result", methods=["POST"])
-def save_ats_result():
-    try:
-        data = request.get_json()
-        user_id = data.get("user_id")
-        ats_score = data.get("ats_score", 0)
-        session_id = data.get("session_id")
-        
-        if not user_id:
-            return jsonify({"error": "user_id required"}), 400
-        
-        # Initialize user stats file if doesn't exist
-        stats_dir = os.path.join(PROJECT_ROOT, "data")
-        os.makedirs(stats_dir, exist_ok=True)
-        stats_file = os.path.join(stats_dir, f"user_{user_id}_stats.json")
-        
-        # Load existing stats
-        if os.path.exists(stats_file):
-            with open(stats_file, "r") as f:
-                user_stats = json.load(f)
-        else:
-            user_stats = {
-                "user_id": user_id,
-                "interviews_completed": 0,
-                "average_score": 0,
-                "total_score": 0,
-                "ats_score": 0,
-                "recent_interviews": []
-            }
-        
-        # Update ATS score
-        user_stats["ats_score"] = ats_score
-        
-        # Save stats
-        with open(stats_file, "w") as f:
-            json.dump(user_stats, f, indent=2)
-        
-        print(f"✅ ATS result saved for user {user_id}: {ats_score}%")
-        return jsonify({"status": "success", "ats_score": ats_score})
-
-    except Exception as e:
-        print("❌ save-ats-result error:", e)
-        return jsonify({"error": str(e)}), 500
+def _stats_path(user_id):
+    return os.path.join(STATS_DIR, f"user_{user_id}_stats.json")
 
 
-# =========================
-# Endpoint: get user stats
-# =========================
+def _load_stats(user_id):
+    path = _stats_path(user_id)
+    stats = {"user_id": user_id, "interviews": [], "ats_checks": []}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            stats.update(json.load(f))
+    if "recent_interviews" in stats and not stats["interviews"]:  # migrate the old format
+        stats["interviews"] = [{"session_id": r.get("session_id"), "date": r.get("date"), "score": r.get("score", 0),
+                                "questions": r.get("questions", 0)} for r in stats["recent_interviews"]]
+    return stats
+
+
+def _save_stats(stats):
+    with open(_stats_path(stats["user_id"]), "w", encoding="utf-8") as f:
+        json.dump({"user_id": stats["user_id"], "interviews": stats["interviews"],
+                   "ats_checks": stats["ats_checks"]}, f, indent=2)
+
+
+def _category_averages(evaluations):
+    totals = {}
+    for e in evaluations:
+        for k, v in (e or {}).get("category_scores", {}).items():
+            totals.setdefault(k, []).append(v)
+    return {k: round(sum(v) / len(v), 1) for k, v in totals.items()}
+
+
+def _record_interview(s):
+    uid = s.get("user_id")
+    if not uid:
+        return
+    fa = s.get("final_assessment") or {}
+    entry = {
+        "session_id": s["session_id"],
+        "date": s.get("finished_at") or datetime.utcnow().isoformat(),
+        "score": round(fa.get("average_score", 0)),
+        "questions": len(s["questions"]),
+        "answered": fa.get("questions_answered", 0),
+        "recommendation": fa.get("final_recommendation"),
+        "focus_areas": fa.get("development_areas", [])[:3],
+        "question_scores": [(e or {}).get("overall_score", 0) for e in s["evaluations"]],
+        "topics": [q.get("topic") for q in s["questions"]],
+        "eye_contact": (s.get("activity_summary") or {}).get("eye_contact_pct"),
+        "tab_switches": len(s.get("tab_events", [])),
+        "has_activity_report": bool(s.get("activity_report_path")),
+    }
+    with _stats_lock:
+        stats = _load_stats(uid)
+        stats["interviews"] = [i for i in stats["interviews"] if i.get("session_id") != s["session_id"]]
+        stats["interviews"].insert(0, entry)
+        stats["interviews"] = stats["interviews"][:50]
+        _save_stats(stats)
+
+
+def _record_ats(s):
+    uid = s.get("user_id")
+    if not uid or not s.get("ats_result"):
+        return
+    r = s["ats_result"]
+    entry = {"session_id": s["session_id"], "date": datetime.utcnow().isoformat(), "score": r["overallScore"],
+             "sections": {k: v["score"] for k, v in r["sections"].items()},
+             "job_description_used": r["details"]["job_description_used"],
+             "file": os.path.basename(s.get("resume_path", "")).split("_", 1)[-1]}
+    with _stats_lock:
+        stats = _load_stats(uid)
+        stats["ats_checks"] = [a for a in stats["ats_checks"] if a.get("session_id") != s["session_id"]]
+        stats["ats_checks"].insert(0, entry)
+        stats["ats_checks"] = stats["ats_checks"][:50]
+        _save_stats(stats)
+
+
 @app.route("/api/user-stats/<user_id>", methods=["GET"])
 def get_user_stats(user_id):
-    try:
-        stats_dir = os.path.join(PROJECT_ROOT, "data")
-        stats_file = os.path.join(stats_dir, f"user_{user_id}_stats.json")
-        
-        if os.path.exists(stats_file):
-            with open(stats_file, "r") as f:
-                user_stats = json.load(f)
-            return jsonify(user_stats)
-        else:
-            # Return default empty stats
-            return jsonify({
-                "user_id": user_id,
-                "interviews_completed": 0,
-                "average_score": 0,
-                "total_score": 0,
-                "ats_score": 0,
-                "recent_interviews": []
-            })
+    if not USER_ID_RE.match(user_id):
+        return _error("Invalid user id.")
+    with _stats_lock:
+        stats = _load_stats(user_id)
+    interviews = stats["interviews"]
+    scores = [i.get("score", 0) for i in interviews]
+    return jsonify({
+        "user_id": user_id,
+        "interviews": interviews,
+        "ats_checks": stats["ats_checks"],
+        "interviews_completed": len(interviews),
+        "average_score": round(sum(scores) / len(scores), 1) if scores else 0,
+        "best_score": max(scores) if scores else 0,
+        "ats_score": stats["ats_checks"][0]["score"] if stats["ats_checks"] else 0,
+    })
 
-    except Exception as e:
-        print("❌ get-user-stats error:", e)
-        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    llm.warm_up()
+    speech.preload()
+    port = int(os.getenv("PORT", "8000"))
+    # The reloader would import everything twice and load Whisper twice.
+    app.run(host="0.0.0.0", port=port, debug=os.getenv("FLASK_DEBUG") == "1", use_reloader=False, threaded=True)
+else:
+    # Running under gunicorn.
+    llm.warm_up()
+    speech.preload()

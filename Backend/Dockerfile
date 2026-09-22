@@ -1,25 +1,20 @@
-# Use official slim Python image
 FROM python:3.11-slim
 
-# Install system dependencies (ffmpeg, libgl1, portaudio for sounddevice)
+# ffmpeg decodes browser audio for Whisper; libgl/libglib are needed by OpenCV/MediaPipe.
 RUN apt-get update && \
-    apt-get install -y ffmpeg libgl1 libportaudio2 portaudio19-dev && \
+    apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
-
-# Copy requirements first
 COPY requirements.txt .
-
-# Install Python deps
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy backend code
 COPY . .
 
-# Expose port
-EXPOSE 8000
+# The LLM runs in Ollama; point OLLAMA_HOST at it (e.g. http://host.docker.internal:11434).
+ENV OLLAMA_HOST=http://host.docker.internal:11434 \
+    LLM_MODEL=qwen3:4b \
+    WHISPER_MODEL=base
 
-# Start app with gunicorn
-CMD ["gunicorn", "backend_api:app", "-w", "2", "-k", "gthread", "-b", "0.0.0.0:8000", "--timeout", "120"]
+EXPOSE 8000
+# One worker: the grading queue and monitoring state live in-process.
+CMD ["gunicorn", "backend_api:app", "-w", "1", "--threads", "8", "-b", "0.0.0.0:8000", "--timeout", "600"]

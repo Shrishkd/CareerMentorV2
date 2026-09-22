@@ -1,642 +1,560 @@
-// src/pages/Interview.tsx
-import React, { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion } from "framer-motion";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { toast } from "@/components/ui/use-toast";
 import Editor from "@monaco-editor/react";
-import axios from "axios";
+import { Check, Keyboard, Mic, Play, Square, Volume2, VolumeX } from "lucide-react";
 import Header from "@/components/Header";
-import { Home } from "lucide-react";
+import { Spinner } from "@/components/bits";
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { toast } from "@/hooks/use-toast";
+import { useTheme } from "@/components/ThemeContext";
+import { api, type InterviewSession } from "@/lib/api";
+import { clearInterview, loadInterview } from "@/lib/profile";
+import { cn } from "@/lib/utils";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const JUDGE0_URL = "https://judge0-ce.p.rapidapi.com/submissions";
+type StoredSession = InterviewSession & { devices?: { camera: boolean; mic: boolean } };
+type Live = { face?: string; gaze?: string; posture?: string };
 
+const FRAME_INTERVAL_MS = 2500;
+const MAX_TAB_SWITCHES = 3;
+const JUDGE0_KEY = import.meta.env.VITE_RAPIDAPI_KEY as string | undefined;
 
-async function safeFetch(url: string, options: RequestInit = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-  return res.json();
+const LANGS = {
+  python: { label: "Python", judge0: 71, starter: "def solve():\n    # Write your solution here\n    pass\n" },
+  cpp: { label: "C++", judge0: 54, starter: "#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    // Write your solution here\n    return 0;\n}\n" },
+  java: { label: "Java", judge0: 62, starter: "public class Main {\n    public static void main(String[] args) {\n        // Write your solution here\n    }\n}\n" },
+  javascript: { label: "JavaScript", judge0: 63, starter: "function solve() {\n  // Write your solution here\n}\n" },
+} as const;
+type Lang = keyof typeof LANGS;
+
+function fmt(sec: number) {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
 }
 
-/**
- * Stricter programming question detector:
- * - Returns true if explicit language names are present OR
- * - Contains strong verbs like implement/write/solve/build
- */
-function isProgrammingQuestion(q: string) {
-  if (!q) return false;
-  const lower = q.toLowerCase();
-
-  // language names (strong signal)
-  const langs = ["python", "c\\+\\+", "cpp", "java", "javascript", "js", "ruby", "go", "golang", "c#"];
-  for (const l of langs) {
-    const re = new RegExp(`\\b${l}\\b`, "i");
-    if (re.test(q)) return true;
-  }
-
-  // strong coding verbs (require ~coding task)
-  const strongVerbs = /\b(implement|write|solve|create|build|produce|construct|complete|program|code)\b/i;
-  if (strongVerbs.test(q)) return true;
-
-  // otherwise, do not treat as programming question
-  return false;
-}
-
-const Interview: React.FC = () => {
+export default function Interview() {
   const navigate = useNavigate();
+  const { isDark } = useTheme();
+  const [session] = useState<StoredSession | null>(() => loadInterview<StoredSession>());
+  const questions = session?.questions ?? [];
 
-  const [sessionData, setSessionData] = useState<any | null>(() => {
-    try {
-      const raw = localStorage.getItem("interview_session");
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  });
-  //Tab switch count
-  const [tabSwitchCount, setTabSwitchCount] = useState(0);
+  const [index, setIndex] = useState(0);
+  const [submitted, setSubmitted] = useState<boolean[]>(() => questions.map(() => false));
+  const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState<"voice" | "text">(session?.devices?.mic ? "voice" : "text");
+  const [typed, setTyped] = useState("");
+  const [code, setCode] = useState<Record<number, string>>({});
+  const [lang, setLang] = useState<Lang>("python");
+  const [runOutput, setRunOutput] = useState<string | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [recordSec, setRecordSec] = useState(0);
+  const [questionSec, setQuestionSec] = useState(0);
+  const [speak, setSpeak] = useState(true);
+  const [live, setLive] = useState<Live>({});
+  const [tabSwitches, setTabSwitches] = useState(0);
+  const [confirmFinish, setConfirmFinish] = useState(false);
+  const [confirmExit, setConfirmExit] = useState(false);
 
-  const [currentQuestion, setCurrentQuestion] = useState<number>(0);
-  const [answers, setAnswers] = useState<string[]>([]);
-  const [evaluations, setEvaluations] = useState<any[]>([]);
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [isProcessingAudio, setIsProcessingAudio] = useState<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const camStream = useRef<MediaStream | null>(null);
+  const recorder = useRef<MediaRecorder | null>(null);
+  const finishing = useRef(false);
 
-  // audio recording
-  const [isRecording, setIsRecording] = useState<boolean>(false);
-  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
-  const audioStreamRef = useRef<MediaStream | null>(null);
-  const [audioChunks, setAudioChunks] = useState<BlobPart[]>([]);
-
-  // code editor
-  const [codeAnswer, setCodeAnswer] = useState<string>("");
-  const [language, setLanguage] = useState<string>("python");
-  const [judgeResult, setJudgeResult] = useState<string>("");
-
-  // TTS toggle
-  const [ttsEnabled, setTtsEnabled] = useState<boolean>(true);
-  const utterRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const q = questions[index];
+  const isCoding = q?.type === "coding";
 
   useEffect(() => {
-    if (!sessionData) {
-      toast({
-        title: "No interview session",
-        description: "Please upload a resume first.",
-      });
-      navigate("/resume-upload");
-    }
-  }, [sessionData, navigate]);
+    if (!session) navigate("/resume-upload", { replace: true });
+  }, [session, navigate]);
 
-
+  // ---- Camera preview + frame upload for activity monitoring --------------
   useEffect(() => {
-    if (!sessionData) return;
-    const q = sessionData.questions?.[currentQuestion];
-    if (!q) return;
-
-    // stop prior TTS
-    if ("speechSynthesis" in window) {
-      try {
-        window.speechSynthesis.cancel();
-      } catch {}
-      if (ttsEnabled) {
-        const u = new SpeechSynthesisUtterance(q);
-        u.lang = "en-US";
-        u.rate = 1.0;
-        utterRef.current = u;
-        try {
-          window.speechSynthesis.speak(u);
-        } catch (err) {
-          console.warn("TTS speak error:", err);
-        }
-      }
-    }
-
-    setCodeAnswer("");
-    setJudgeResult("");
-
-    const lower = q.toLowerCase();
-    if (lower.includes("python")) setLanguage("python");
-    else if (lower.includes("c++") || lower.includes("cpp")) setLanguage("cpp");
-    else if (lower.includes("java")) setLanguage("java");
-    else if (lower.includes("javascript") || lower.includes("js")) setLanguage("javascript");
-    else setLanguage("python");
-  }, [currentQuestion, sessionData, ttsEnabled]);
-
-
-  const finishInterview = async () => {
-  if (!sessionData) return;
-
-  try {
-    toast({ title: "Generating report", description: "Please wait..." });
-
-    const data = await safeFetch(`${API_BASE}/api/generate-report`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionData.session_id }),
-    });
-
-    // ⭐ Save report url from backend
-    localStorage.setItem(
-      "InterviewResults",
-      JSON.stringify({
-        session_id: sessionData.session_id,
-        questions: sessionData.questions,
-        answers,
-        evaluations,
-        report_url: data.report_url,      // <-- THIS LINE IS SUPER IMPORTANT
-        report_path: data.report_path,    // optional
+    if (!session?.devices?.camera) return;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let stopped = false;
+    navigator.mediaDevices
+      .getUserMedia({ video: { width: 640, height: 480 } })
+      .then((stream) => {
+        if (stopped) return stream.getTracks().forEach((t) => t.stop());
+        camStream.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+        timer = setInterval(() => {
+          const v = videoRef.current;
+          const c = canvasRef.current;
+          if (!v || !c || v.readyState < 2 || document.hidden) return;
+          c.width = 480;
+          c.height = Math.round((480 * v.videoHeight) / v.videoWidth) || 360;
+          c.getContext("2d")?.drawImage(v, 0, 0, c.width, c.height);
+          c.toBlob(
+            async (blob) => {
+              if (!blob || finishing.current) return;
+              const form = new FormData();
+              form.append("session_id", session.session_id);
+              form.append("frame", blob, "frame.jpg");
+              try {
+                setLive(await api.form<Live>("/api/monitor-frame", form));
+              } catch (e) {
+                // Monitoring is optional; stop trying if the server can't analyse frames.
+                if ((e as { status?: number }).status === 503) clearInterval(timer);
+              }
+            },
+            "image/jpeg",
+            0.7,
+          );
+        }, FRAME_INTERVAL_MS);
       })
-    );
+      .catch(() => toast({ title: "Camera unavailable", description: "Continuing without activity monitoring." }));
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      camStream.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, [session]);
 
-    toast({ title: "Interview complete", description: "Redirecting to results..." });
-    
-    navigate("/InterviewResults", {
-    state: { sessionId: sessionData.session_id },
-    });
- 
-  } catch (err) {
-    console.error("finishInterview failed:", err);
-    toast({
-      title: "Report generation failed",
-      description: (err as Error).message,
-      variant: "destructive",
-    });
-  }
-};
-
-  // Detect tab switching
+  // ---- Timers ---------------------------------------------------------------
   useEffect(() => {
-  const handleVisibilityChange = () => {
-    if (document.hidden) {
-      setTabSwitchCount((prev) => {
-        const next = prev + 1;
+    setQuestionSec(0);
+    const t = setInterval(() => setQuestionSec((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [index]);
 
-        if (next === 1) {
+  useEffect(() => {
+    if (!recording) return;
+    setRecordSec(0);
+    const t = setInterval(() => setRecordSec((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [recording]);
+
+  // ---- Read the question aloud --------------------------------------------
+  useEffect(() => {
+    if (!q || !("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    if (speak) {
+      const u = new SpeechSynthesisUtterance(q.question);
+      u.lang = "en-US";
+      u.rate = 1;
+      window.speechSynthesis.speak(u);
+    }
+    setTyped("");
+    setRunOutput(null);
+    return () => window.speechSynthesis.cancel();
+  }, [q, speak]);
+
+  // ---- Finish ---------------------------------------------------------------
+  const finish = useCallback(() => {
+    if (!session || finishing.current) return;
+    finishing.current = true;
+    if (recorder.current?.state === "recording") recorder.current.stop();
+    camStream.current?.getTracks().forEach((t) => t.stop());
+    window.speechSynthesis?.cancel();
+    clearInterview();
+    localStorage.setItem("cm_last_session", session.session_id); // lets /results survive a refresh
+    navigate("/results", { state: { sessionId: session.session_id }, replace: true });
+  }, [session, navigate]);
+
+  const finishRef = useRef(finish);
+  finishRef.current = finish;
+
+  // ---- Tab switch detection (listener attached once) -----------------------
+  useEffect(() => {
+    if (!session) return;
+    const onVisibility = () => {
+      if (!document.hidden || finishing.current) return;
+      api.post("/api/monitor-event", { session_id: session.session_id, type: "tab_hidden" }).catch(() => {});
+      setTabSwitches((n) => {
+        const next = n + 1;
+        if (next >= MAX_TAB_SWITCHES) {
+          toast({ title: "Interview ended", description: "You left the tab three times.", variant: "destructive" });
+          setTimeout(() => finishRef.current(), 0);
+        } else {
           toast({
-            title: "Warning 1",
-            description: "Please do not switch tabs during the interview.",
+            title: `Tab switch ${next} of ${MAX_TAB_SWITCHES - 1} allowed`,
+            description: next === MAX_TAB_SWITCHES - 1 ? "One more switch will end the interview." : "Stay on this tab during the interview.",
             variant: "destructive",
           });
         }
-
-        if (next === 2) {
-          toast({
-            title: "Warning 2",
-            description: "Switching tabs again will end the interview.",
-            variant: "destructive",
-          });
-        }
-
-        if (next >= 3) {
-          toast({
-            title: "Interview terminated",
-            description: "You switched tabs multiple times.",
-            variant: "destructive",
-          });
-
-          finishInterview();
-        }
-
         return next;
       });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [session]);
+
+  // Warn before closing the tab mid-interview.
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!finishing.current) e.preventDefault();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
+  // ---- Submitting -----------------------------------------------------------
+  const advance = () => {
+    setSubmitted((s) => s.map((v, i) => (i === index ? true : v)));
+    const nextOpen = questions.findIndex((_, i) => i > index && !submitted[i]);
+    if (nextOpen !== -1) setIndex(nextOpen);
+    else if (index < questions.length - 1) setIndex(index + 1);
+    else setConfirmFinish(true);
+  };
+
+  const submitJSON = async (answer: string, type: "text" | "code") => {
+    if (!session) return;
+    setBusy(true);
+    try {
+      await api.post("/api/submit-answer", { session_id: session.session_id, question_index: index, answer, type });
+      toast({ title: "Answer saved", description: "It's being graded in the background." });
+      advance();
+    } catch (e) {
+      toast({ title: "Couldn't save your answer", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
     }
   };
 
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-
-  return () => {
-    document.removeEventListener("visibilitychange", handleVisibilityChange);
-  };
-}, [finishInterview]);
-
-
-  // ---------- AUDIO RECORDING ----------
   const startRecording = async () => {
-    if (!sessionData) {
-      toast({ title: "Missing session", description: "Upload resume first." });
-      return;
-    }
-
+    window.speechSynthesis?.cancel();
     try {
-      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-    } catch {}
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      audioStreamRef.current = stream;
-
-      let options: MediaRecorderOptions = {};
-      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) options = { mimeType: "audio/webm;codecs=opus" };
-      else if (MediaRecorder.isTypeSupported("audio/webm")) options = { mimeType: "audio/webm" };
-      else if (MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) options = { mimeType: "audio/ogg;codecs=opus" };
-
-      const recorder = new MediaRecorder(stream, options);
-      const localChunks: BlobPart[] = [];
-
-      recorder.ondataavailable = (ev: BlobEvent) => {
-        if (ev.data && ev.data.size > 0) {
-          localChunks.push(ev.data);
-          setAudioChunks((prev) => [...prev, ev.data]);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"].find((m) => MediaRecorder.isTypeSupported(m));
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      const chunks: Blob[] = [];
+      const questionIndex = index;
+      rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setRecording(false);
+        if (finishing.current || !session) return;
+        const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+        if (blob.size < 2000) {
+          toast({ title: "Nothing was recorded", description: "Check your microphone and try again.", variant: "destructive" });
+          return;
         }
-      };
-
-      recorder.onstop = async () => {
-        if (localChunks.length > 0) {
-          const blob = new Blob(localChunks, { type: localChunks[0] instanceof Blob ? (localChunks[0] as Blob).type : "audio/webm" });
-          await submitAudio(blob);
-        }
+        setBusy(true);
         try {
-          stream.getTracks().forEach((t) => t.stop());
-        } catch {}
-        audioStreamRef.current = null;
-        setMediaRecorder(null);
-      };
-
-      recorder.start();
-      setMediaRecorder(recorder);
-      setIsRecording(true);
-      setAudioChunks([]);
-      toast({ title: "Recording started", description: "Speak your answer clearly." });
-    } catch (err) {
-      console.error("Recording failed:", err);
-      toast({ title: "Recording failed", description: "Allow microphone access and try again.", variant: "destructive" });
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorder && isRecording) {
-      mediaRecorder.stop();
-      setIsRecording(false);
-      toast({ title: "Recording stopped", description: "Processing your answer..." });
-    }
-  };
-
-  const submitAudio = async (audioBlob: Blob) => {
-    if (!sessionData) return;
-    setIsSubmitting(true);
-    setIsProcessingAudio(true);
-
-    try {
-      const form = new FormData();
-      form.append("session_id", sessionData.session_id);
-      form.append("question_index", String(currentQuestion));
-      const ext = audioBlob.type.includes("ogg") ? "ogg" : audioBlob.type.includes("wav") ? "wav" : "webm";
-      form.append("audio", audioBlob, `answer.${ext}`);
-
-      const res = await fetch(`${API_BASE}/api/submit-answer`, { method: "POST", body: form });
-      const data = await res.json();
-
-      if (res.ok && data && data.evaluation) {
-        toast({ title: "Answer evaluated", description: `Score: ${data.evaluation.overall_score ?? "N/A"}/100` });
-        setAnswers((prev) => [...prev, data.transcript || ""]);
-        setEvaluations((prev) => [...prev, data.evaluation]);
-
-        if (currentQuestion < (sessionData.questions?.length || 0) - 1) {
-          setCurrentQuestion((q) => q + 1);
-        } else {
-          await finishInterview();
+          const form = new FormData();
+          form.append("session_id", session.session_id);
+          form.append("question_index", String(questionIndex));
+          form.append("audio", blob, `answer.${blob.type.includes("ogg") ? "ogg" : "webm"}`);
+          await api.form("/api/submit-answer", form);
+          toast({ title: "Answer saved", description: "It's being transcribed and graded in the background." });
+          advance();
+        } catch (e) {
+          toast({ title: "Upload failed", description: (e as Error).message, variant: "destructive" });
+        } finally {
+          setBusy(false);
         }
-      } else {
-        console.error("submit-audio invalid response:", data);
-        throw new Error(data?.error || "Invalid server response");
-      }
-    } catch (err) {
-      console.error("Audio submission failed:", err);
-      toast({ title: "Submission failed", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
-    } finally {
-      setIsSubmitting(false);
-      setIsProcessingAudio(false);
-      setAudioChunks([]);
+      };
+      rec.start(1000);
+      recorder.current = rec;
+      setRecording(true);
+    } catch {
+      toast({ title: "Microphone blocked", description: "Switching to typed answers.", variant: "destructive" });
+      setMode("text");
     }
   };
 
-  // ---------- CODE (MONACO) + JUDGE0 ----------
+  const stopRecording = () => recorder.current?.state === "recording" && recorder.current.stop();
+
   const runCode = async () => {
-    if (!codeAnswer.trim()) {
-      toast({ title: "No code", description: "Write code in the editor before running.", variant: "destructive" });
-      return;
-    }
-    setJudgeResult("Running...");
+    if (!JUDGE0_KEY) return;
+    setRunOutput("Running…");
     try {
-      const langMap: Record<string, number> = { python: 71, cpp: 54, java: 62, javascript: 63 };
-      const language_id = langMap[language] ?? 71;
-      const body = {
-        source_code: codeAnswer,
-        language_id,
-      };
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
-        "X-RapidAPI-Key": import.meta.env.VITE_RAPIDAPI_KEY || ""
-      };
-
-      const url = `${JUDGE0_URL}?base64_encoded=false&wait=true`;
-      const res = await axios.post(url, body, { headers });
-      const out = res.data;
-      if (out.stderr) setJudgeResult(`❌ Error:\n${out.stderr}`);
-      else if (out.compile_output) setJudgeResult(`❌ Compile Error:\n${out.compile_output}`);
-      else setJudgeResult(`✅ Output:\n${out.stdout || "No output"}`);
-    } catch (err) {
-      console.error("Judge0 error:", err);
-      setJudgeResult(`❌ Judge0 error: ${(err as Error).message}`);
-    }
-  };
-
-  const submitCodeAnswer = async () => {
-    if (!sessionData) return;
-    if (!codeAnswer.trim()) {
-      toast({ title: "Empty", description: "Type your code before submitting.", variant: "destructive" });
-      return;
-    }
-    setIsSubmitting(true);
-    try {
-      const payload = {
-        session_id: sessionData.session_id,
-        question_index: currentQuestion,
-        answer: codeAnswer,
-        type: "code",
-      };
-      const res = await fetch(`${API_BASE}/api/submit-answer`, {
+      const res = await fetch("https://judge0-ce.p.rapidapi.com/submissions?base64_encoded=false&wait=true", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        headers: {
+          "Content-Type": "application/json",
+          "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
+          "X-RapidAPI-Key": JUDGE0_KEY,
+        },
+        body: JSON.stringify({ source_code: code[index] ?? "", language_id: LANGS[lang].judge0 }),
       });
-      const data = await res.json();
-      if (res.ok && data && data.evaluation) {
-        toast({ title: "Code evaluated", description: `Score: ${data.evaluation.overall_score ?? "N/A"}/100` });
-        setAnswers((prev) => [...prev, codeAnswer]);
-        setEvaluations((prev) => [...prev, data.evaluation]);
-        if (currentQuestion < (sessionData.questions?.length || 0) - 1) {
-          setCurrentQuestion((q) => q + 1);
-        } else {
-          await finishInterview();
-        }
-      } else {
-        throw new Error(data?.error || "Invalid response from server");
-      }
-    } catch (err) {
-      console.error("submitCodeAnswer failed:", err);
-      toast({ title: "Submit failed", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
-    } finally {
-      setIsSubmitting(false);
+      const out = await res.json();
+      if (!res.ok) throw new Error(out.message || `HTTP ${res.status}`);
+      setRunOutput(out.compile_output || out.stderr || out.stdout || "(no output)");
+    } catch (e) {
+      setRunOutput(`Could not run code: ${(e as Error).message}`);
     }
   };
 
-  // Submit typed/text answer (non-empty)
-  const submitTextAnswer = async (text: string) => {
-    if (!sessionData) return;
-    setIsSubmitting(true);
-    try {
-      const payload = { session_id: sessionData.session_id, question_index: currentQuestion, answer: text, type: "text" };
-      const res = await fetch(`${API_BASE}/api/submit-answer`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (res.ok && data && data.evaluation) {
-        toast({ title: "Answer evaluated", description: `Score: ${data.evaluation.overall_score ?? "N/A"}/100` });
-        setAnswers((prev) => [...prev, text]);
-        setEvaluations((prev) => [...prev, data.evaluation]);
-        if (currentQuestion < (sessionData.questions?.length || 0) - 1) {
-          setCurrentQuestion((q) => q + 1);
-        } else {
-          await finishInterview();
-        }
-      } else {
-        throw new Error(data?.error || "Invalid response from server");
-      }
-    } catch (err) {
-      console.error("submitTextAnswer failed:", err);
-      toast({ title: "Submit failed", description: (err as Error).message, variant: "destructive" });
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+  if (!session || !q) return null;
 
-  // Skip current question (submit as SKIPPED)
-  const skipQuestion = async () => {
-    if (!sessionData) return;
-    setIsSubmitting(true);
-    try {
-      const payload = { session_id: sessionData.session_id, question_index: currentQuestion, answer: "SKIPPED", type: "text" };
-      const res = await fetch(`${API_BASE}/api/submit-answer`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (res.ok && data && data.evaluation) {
-        // treat as answered with fallback evaluation
-        setAnswers((prev) => [...prev, "SKIPPED"]);
-        setEvaluations((prev) => [...prev, data.evaluation]);
-      } else {
-        // fallback local skip (if backend failed)
-        setAnswers((prev) => [...prev, "SKIPPED"]);
-        setEvaluations((prev) => [...prev, { overall_score: 0, detailed_feedback: "Skipped" }]);
-      }
-
-      if (currentQuestion < (sessionData.questions?.length || 0) - 1) {
-        setCurrentQuestion((q) => q + 1);
-      } else {
-        await finishInterview();
-      }
-    } catch (err) {
-      console.error("skipQuestion failed:", err);
-      toast({ title: "Skip failed", description: (err as Error).message, variant: "destructive" });
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // ---------- Monitoring / Finish ----------
-  const startMonitoring = async (durationSec = 180) => {
-    if (!sessionData) return;
-    try {
-      await safeFetch(`${API_BASE}/api/start-monitoring`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionData.session_id, duration: durationSec }),
-      });
-      toast({ title: "Monitoring started", description: "Server-side camera monitoring started." });
-    } catch (err) {
-      console.error("startMonitoring failed:", err);
-      toast({ title: "Monitoring failed", description: (err as Error).message, variant: "destructive" });
-    }
-  };
-
-
-  // ---------- Render ----------
-  if (!sessionData) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4" />
-          <p className="text-muted-foreground">Loading interview session...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const total = sessionData.questions?.length || 0;
-  const progressPercentage = total ? (((currentQuestion + 1) / total) * 100) : 0;
-  const questionText = sessionData.questions[currentQuestion] ?? "";
-  const programQ = isProgrammingQuestion(questionText);
+  const answeredCount = submitted.filter(Boolean).length;
+  const currentCode = code[index] ?? LANGS[lang].starter;
+  const codeChanged = currentCode.trim() !== LANGS[lang].starter.trim() && currentCode.trim().length > 0;
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <Header />
-      
-      <div className="py-8 px-4 sm:px-6 lg:px-8">
-      
-      <div className="max-w-4xl mx-auto">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-foreground mb-4">AI Interview Session</h1>
-          <div className="flex items-center justify-center space-x-6 text-lg">
-            <span className="text-muted-foreground">Question {currentQuestion + 1} of {total}</span>
-            <div className="bg-primary/10 px-4 py-2 rounded-full">
-              <span className="text-primary font-semibold">Completing {Math.round(progressPercentage)}% </span>
-            </div>
+    <div className="min-h-screen">
+      <Header focus onExit={() => setConfirmExit(true)} />
+      <canvas ref={canvasRef} className="hidden" />
+
+      <main className="container grid gap-8 py-8 lg:grid-cols-[1fr_300px]">
+        {/* Question + answer */}
+        <section className="min-w-0">
+          <div className="flex items-center justify-between">
+            <p className="eyebrow">
+              Question {index + 1} of {questions.length} · {isCoding ? "Coding" : "Conceptual"}
+            </p>
+            <span className="num text-xs text-muted-foreground">{fmt(questionSec)}</span>
           </div>
-        </motion.div>
 
-        <div className="mb-8">
-          <div className="bg-muted rounded-full h-3">
-            <div className="bg-gradient-to-r from-primary to-accent h-3 rounded-full transition-all duration-500" style={{ width: `${progressPercentage}%` }} />
+          <h1 className="mt-4 text-2xl font-medium leading-snug sm:text-[28px]">{q.question}</h1>
+          <div className="mt-3 flex items-center gap-3 text-sm text-muted-foreground">
+            <span className="capitalize">{q.topic}</span>
+            <span>·</span>
+            <button onClick={() => setSpeak((s) => !s)} className="inline-flex items-center gap-1.5 hover:text-foreground">
+              {speak ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+              {speak ? "Reading aloud" : "Muted"}
+            </button>
+            {submitted[index] && (
+              <>
+                <span>·</span>
+                <span className="inline-flex items-center gap-1 text-success">
+                  <Check className="h-3.5 w-3.5" /> Submitted, re-answering replaces it
+                </span>
+              </>
+            )}
           </div>
-        </div>
 
-        <Card className="mb-8">
-          <CardContent className="p-8">
-            <div className="flex justify-between items-start mb-6">
-              <h2 className="text-2xl font-semibold text-foreground">{questionText}</h2>
-              <Button
-                variant="ghost"
-                onClick={() => navigate('/dashboard')}
-                className="flex items-center gap-2"
-                disabled={isSubmitting}
-              >
-                <Home className="h-4 w-4" />
-                Home
-              </Button>
-            </div>
-
-            <div className="mb-6">
-              <p className="text-sm text-muted-foreground">💡 Tip: For coding questions use the editor below and run your code. For others, record your voice.</p>
-            </div>
-
-            {programQ ? (
-              <div>
-                <div className="mb-3 flex items-center gap-3">
-                  <label className="text-sm">Language</label>
-                  <select value={language} onChange={(e) => setLanguage(e.target.value)} className="p-1 rounded border">
-                    <option value="python">Python</option>
-                    <option value="cpp">C++</option>
-                    <option value="java">Java</option>
-                    <option value="javascript">JavaScript</option>
+          <div className="mt-8">
+            {isCoding ? (
+              <div className="overflow-hidden rounded-md border bg-card">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+                  <select
+                    value={lang}
+                    onChange={(e) => setLang(e.target.value as Lang)}
+                    className="h-8 rounded border bg-background px-2 text-sm"
+                    aria-label="Language"
+                  >
+                    {Object.entries(LANGS).map(([k, v]) => (
+                      <option key={k} value={k}>{v.label}</option>
+                    ))}
                   </select>
-
-                  <Button onClick={runCode} disabled={!codeAnswer.trim()}>Run Code</Button>
-                  <Button onClick={submitCodeAnswer} disabled={!codeAnswer.trim() || isSubmitting}>
-                    {isSubmitting ? (
-                      <>
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                        Analyzing...
-                      </>
-                    ) : (
-                      'Submit Code'
+                  <div className="flex items-center gap-2">
+                    {JUDGE0_KEY && (
+                      <Button variant="outline" size="sm" onClick={runCode} disabled={!codeChanged}>
+                        <Play className="h-3.5 w-3.5" /> Run
+                      </Button>
                     )}
-                  </Button>
-                  <Button variant="ghost" onClick={skipQuestion} disabled={isSubmitting}>Skip</Button>
+                    <Button size="sm" onClick={() => submitJSON(`// ${LANGS[lang].label}\n${currentCode}`, "code")} disabled={!codeChanged || busy}>
+                      {busy ? <Spinner /> : null} Submit solution
+                    </Button>
+                  </div>
                 </div>
-
                 <Editor
-                  height="360px"
-                  defaultLanguage={language === "cpp" ? "cpp" : language}
-                  language={language === "cpp" ? "cpp" : language}
-                  value={codeAnswer}
-                  onChange={(v) => setCodeAnswer(v ?? "")}
-                  theme="vs-dark"
-                  options={{ minimap: { enabled: false }, fontSize: 13 }}
+                  height="380px"
+                  language={lang}
+                  value={currentCode}
+                  onChange={(v) => setCode((c) => ({ ...c, [index]: v ?? "" }))}
+                  theme={isDark ? "vs-dark" : "light"}
+                  options={{
+                    minimap: { enabled: false },
+                    fontSize: 14,
+                    fontFamily: "'Geist Mono', ui-monospace, monospace",
+                    scrollBeyondLastLine: false,
+                    padding: { top: 12 },
+                    tabSize: 4,
+                  }}
                 />
-
-                {judgeResult && (
-                  <pre className="bg-black text-white p-3 mt-3 rounded text-sm whitespace-pre-wrap">
-                    {judgeResult}
-                  </pre>
+                {runOutput !== null && (
+                  <pre className="num max-h-48 overflow-auto border-t bg-muted/50 px-4 py-3 text-xs whitespace-pre-wrap">{runOutput}</pre>
                 )}
+                <p className="border-t px-3 py-2 text-xs text-muted-foreground">
+                  Add a comment explaining your approach and its time complexity. It counts toward the score.
+                </p>
+              </div>
+            ) : mode === "voice" ? (
+              <div className="rounded-md border bg-card p-8 text-center">
+                {!recording ? (
+                  <>
+                    <button
+                      onClick={startRecording}
+                      disabled={busy}
+                      className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-foreground text-background transition-transform hover:scale-105 disabled:opacity-50"
+                      aria-label="Start recording"
+                    >
+                      {busy ? <Spinner /> : <Mic className="h-6 w-6" />}
+                    </button>
+                    <p className="mt-4 text-sm font-medium">{busy ? "Uploading…" : "Record your answer"}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">Think for a moment, then speak as you would to an interviewer.</p>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={stopRecording}
+                      className="relative mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                      aria-label="Stop recording"
+                    >
+                      <span className="absolute inset-0 animate-ping rounded-full bg-destructive/30" />
+                      <Square className="relative h-5 w-5 fill-current" />
+                    </button>
+                    <p className="num mt-4 text-2xl">{fmt(recordSec)}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">Recording. Click stop when you're done.</p>
+                  </>
+                )}
+                <button
+                  onClick={() => setMode("text")}
+                  disabled={recording}
+                  className="mt-6 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-40"
+                >
+                  <Keyboard className="h-3.5 w-3.5" /> Type instead
+                </button>
               </div>
             ) : (
-              <div className="flex items-center gap-4">
-                {!isRecording ? (
-                  <Button onClick={startRecording} disabled={isSubmitting}>
-                    Start Recording
+              <div className="rounded-md border bg-card">
+                <textarea
+                  value={typed}
+                  onChange={(e) => setTyped(e.target.value)}
+                  rows={9}
+                  placeholder="Write your answer as you would say it: what it is, how it works, an example, and the trade-offs."
+                  className="w-full resize-y rounded-t-md bg-transparent px-4 py-3 text-[15px] leading-relaxed outline-none"
+                />
+                <div className="flex items-center justify-between border-t px-3 py-2">
+                  <div className="flex items-center gap-3">
+                    <span className="num text-xs text-muted-foreground">{typed.trim() ? typed.trim().split(/\s+/).length : 0} words</span>
+                    {session.devices?.mic && (
+                      <button onClick={() => setMode("voice")} className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+                        <Mic className="h-3.5 w-3.5" /> Answer by voice
+                      </button>
+                    )}
+                  </div>
+                  <Button size="sm" onClick={() => submitJSON(typed, "text")} disabled={typed.trim().split(/\s+/).length < 3 || busy}>
+                    {busy ? <Spinner /> : null} Submit answer
                   </Button>
-                ) : (
-                  <Button variant="destructive" onClick={stopRecording} disabled={isSubmitting}>
-                    Stop Recording
-                  </Button>
-                )}
-
-                <Button onClick={() => startMonitoring(180)} disabled={isRecording || isSubmitting}>
-                  Start Monitoring (Server)
-                </Button>
-
-                <Button onClick={skipQuestion} disabled={isSubmitting}>
-                  {isSubmitting ? (
-                    <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2"></div>
-                      Processing...
-                    </>
-                  ) : (
-                    'Skip Question'
-                  )}
-                </Button>
-
-                <Button onClick={finishInterview} disabled={isRecording || isSubmitting}>
-                  {isSubmitting ? (
-                    <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                      Analyzing...
-                    </>
-                  ) : (
-                    'Finish Interview'
-                  )}
-                </Button>
+                </div>
               </div>
             )}
-          </CardContent>
-        </Card>
-
-        <div className="text-sm text-muted-foreground mt-4">
-          <p>Answers recorded: {answers.length} • Evaluations: {evaluations.length}</p>
-
-          <div className="mt-3 flex items-center gap-3">
-            <label className="text-sm">Read questions aloud:</label>
-            <input type="checkbox" checked={ttsEnabled} onChange={(e) => setTtsEnabled(e.target.checked)} />
           </div>
-        </div>
 
-        {/* Audio Processing Overlay */}
-        {isProcessingAudio && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-background p-6 rounded-lg shadow-lg text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
-              <p className="text-lg font-medium">Processing your audio answer...</p>
-              <p className="text-sm text-muted-foreground mt-2">Please wait while we analyze your response</p>
+          <div className="mt-6 flex items-center justify-between">
+            <button
+              onClick={() => (index < questions.length - 1 ? setIndex(index + 1) : setConfirmFinish(true))}
+              disabled={recording || busy}
+              className="text-sm text-muted-foreground hover:text-foreground disabled:opacity-40"
+            >
+              Skip this question
+            </button>
+            <Button variant="outline" onClick={() => setConfirmFinish(true)} disabled={recording || busy}>
+              Finish interview
+            </Button>
+          </div>
+        </section>
+
+        {/* Sidebar */}
+        <aside className="space-y-4">
+          <div className="overflow-hidden rounded-md border bg-card">
+            <div className="relative aspect-[4/3] bg-muted">
+              {session.devices?.camera ? (
+                <video ref={videoRef} autoPlay playsInline muted className="h-full w-full scale-x-[-1] object-cover" />
+              ) : (
+                <div className="flex h-full items-center justify-center px-6 text-center text-xs text-muted-foreground">
+                  Camera off. The activity report will only include tab switches.
+                </div>
+              )}
+              {recording && (
+                <span className="absolute left-2 top-2 inline-flex items-center gap-1.5 rounded bg-black/60 px-2 py-0.5 text-[11px] text-white">
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-500" /> REC
+                </span>
+              )}
             </div>
+            {session.devices?.camera && (
+              <dl className="grid grid-cols-3 divide-x border-t text-center">
+                <LiveCell label="Face" value={live.face === "missing" ? "Not seen" : live.face === "multiple" ? "2+ people" : live.gaze ? "OK" : "…"} bad={!!live.face} />
+                <LiveCell label="Gaze" value={live.gaze === "calibrating" ? "Calibrating" : live.gaze === "away" ? "Away" : live.gaze === "down" ? "Down" : live.gaze ? "On screen" : "…"} bad={live.gaze === "away" || live.gaze === "down"} />
+                <LiveCell label="Posture" value={live.posture === "slouched" ? "Slouched" : live.posture === "tilted" ? "Tilted" : live.posture === "upright" ? "Upright" : live.posture === "calibrating" ? "Calibrating" : "…"} bad={live.posture === "slouched" || live.posture === "tilted"} />
+              </dl>
+            )}
           </div>
-        )}
-      </div>
-      </div>
+
+          <div className="rounded-md border bg-card p-4">
+            <div className="flex items-baseline justify-between">
+              <p className="text-sm font-medium">Questions</p>
+              <p className="num text-xs text-muted-foreground">{answeredCount}/{questions.length} answered</p>
+            </div>
+            <ol className="mt-3 space-y-1">
+              {questions.map((item, i) => (
+                <li key={i}>
+                  <button
+                    onClick={() => !recording && setIndex(i)}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded px-2 py-1.5 text-left text-sm transition-colors",
+                      i === index ? "bg-muted" : "hover:bg-muted/60",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "num flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px]",
+                        submitted[i] && "border-success bg-success text-success-foreground",
+                      )}
+                    >
+                      {submitted[i] ? <Check className="h-3 w-3" /> : i + 1}
+                    </span>
+                    <span className="truncate capitalize text-muted-foreground">
+                      {item.type === "coding" ? "Coding" : item.topic}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          <p className={cn("px-1 text-xs", tabSwitches ? "text-destructive" : "text-muted-foreground")}>
+            Tab switches: <span className="num">{tabSwitches}</span> of {MAX_TAB_SWITCHES - 1} allowed
+          </p>
+        </aside>
+      </main>
+
+      <AlertDialog open={confirmFinish} onOpenChange={setConfirmFinish}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Finish the interview?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {answeredCount < questions.length
+                ? `You've answered ${answeredCount} of ${questions.length} questions. Unanswered questions score zero.`
+                : "All questions are answered. Your report will be ready once grading finishes."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep going</AlertDialogCancel>
+            <AlertDialogAction onClick={finish}>See my report</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmExit} onOpenChange={setConfirmExit}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave this interview?</AlertDialogTitle>
+            <AlertDialogDescription>Your progress won't be saved and no report will be generated.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                finishing.current = true;
+                camStream.current?.getTracks().forEach((t) => t.stop());
+                clearInterview();
+                navigate("/dashboard");
+              }}
+            >
+              Leave
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
-};
+}
 
-export default Interview;
+function LiveCell({ label, value, bad }: { label: string; value: string; bad?: boolean }) {
+  return (
+    <div className="px-2 py-2.5">
+      <dt className="eyebrow text-[10px]">{label}</dt>
+      <dd className={cn("mt-0.5 text-xs", bad ? "text-warning" : "text-foreground")}>{value}</dd>
+    </div>
+  );
+}
+

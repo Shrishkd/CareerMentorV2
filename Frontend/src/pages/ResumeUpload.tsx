@@ -1,219 +1,178 @@
-// src/pages/ResumeUpload.tsx
-import React, { useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useDropzone } from 'react-dropzone';
-import { Upload, FileText, X, ArrowLeft, ArrowRight, Home } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { useToast } from '@/hooks/use-toast';
-import { motion } from 'framer-motion';
-import Header from '@/components/Header';
+import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useDropzone } from "react-dropzone";
+import { FileText, Upload, X } from "lucide-react";
+import Header from "@/components/Header";
+import { FlowSteps, Spinner } from "@/components/bits";
+import { Button } from "@/components/ui/button";
+import { api, type InterviewSession } from "@/lib/api";
+import { saveInterview } from "@/lib/profile";
+import { useProfile } from "@/hooks/useProfile";
+import { cn } from "@/lib/utils";
 
-// ✅ Define API base correctly
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const STAGES = [
+  "Reading your resume",
+  "Finding your projects and skills",
+  "Writing questions about your work",
+  "Preparing two coding problems",
+];
 
-const ResumeUpload: React.FC = () => {
+export default function ResumeUpload() {
   const navigate = useNavigate();
-  const { toast } = useToast();
+  const { profile } = useProfile();
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stage, setStage] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
 
-  const handleUpload = async (uploadedFile: File) => {
-    setUploading(true);
+  // Question generation on a CPU takes a minute or two; show honest progress.
+  useEffect(() => {
+    if (!uploading) return;
+    setStage(0);
+    setElapsed(0);
+    const t = setInterval(() => {
+      setElapsed((e) => {
+        const next = e + 1;
+        setStage(next < 3 ? 0 : next < 8 ? 1 : next < 45 ? 2 : 3);
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [uploading]);
+
+  const onDrop = useCallback((accepted: File[], rejected: unknown[]) => {
     setError(null);
-
-    try {
-      const formData = new FormData();
-      formData.append('resume', uploadedFile);
-
-      console.log('📤 Uploading resume to backend:', `${API_BASE}/api/upload-resume`);
-
-      const res = await fetch(`${API_BASE}/api/upload-resume`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} : ${await res.text()}`);
-      }
-
-      const data = await res.json();
-
-      if (data && data.session_id) {
-        console.log('✅ Resume uploaded successfully');
-
-        // Normalize session object and store it
-        const sessionObj = {
-          session_id: data.session_id,
-          questions: data.questions || [],
-          question_count: data.question_count || (data.questions ? data.questions.length : 0),
-          resume_path: data.resume_path || null,
-          created_at: new Date().toISOString(),
-          permissions: { mic: false, camera: false },
-          permissions_granted: false,
-        };
-
-        localStorage.setItem('interview_session', JSON.stringify(sessionObj));
-
-        toast({
-          title: "Resume Uploaded Successfully",
-          description: `Generated ${sessionObj.question_count} personalized questions!`,
-        });
-
-        navigate('/grant-permissions');
-      } else {
-        throw new Error('Invalid response from server - no session ID received');
-      }
-    } catch (err) {
-      console.error('❌ Upload failed:', err);
-      const errorMessage = err instanceof Error ? err.message : 'Upload failed';
-      setError(errorMessage);
-
-      toast({
-        title: "Upload Failed",
-        description: errorMessage,
-        variant: "destructive",
-      });
-    } finally {
-      setUploading(false);
+    if (rejected.length) {
+      setError("Upload a PDF or Word (.docx) file under 10 MB.");
+      return;
     }
-  };
-
-  const onDrop = useCallback(
-    (acceptedFiles: File[], rejectedFiles: any[]) => {
-      if (rejectedFiles.length > 0) {
-        setError('Please upload only PDF files (max 10MB)');
-        toast({
-          title: "Invalid File",
-          description: "Please upload only PDF files (max 10MB)",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      if (acceptedFiles.length > 0) {
-        const uploadedFile = acceptedFiles[0];
-        setFile(uploadedFile);
-        setError(null);
-        handleUpload(uploadedFile);
-      }
-    },
-    [toast]
-  );
+    if (accepted[0]) setFile(accepted[0]);
+  }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop: uploading ? () => {} : onDrop,
-    accept: { 'application/pdf': ['.pdf'] },
-    maxSize: 10 * 1024 * 1024, // 10MB
+    onDrop,
+    accept: {
+      "application/pdf": [".pdf"],
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+    },
+    maxSize: 10 * 1024 * 1024,
     multiple: false,
     disabled: uploading,
   });
 
-  const removeFile = () => {
-    setFile(null);
+  const start = async () => {
+    if (!file) return;
+    setUploading(true);
     setError(null);
+    try {
+      const form = new FormData();
+      form.append("resume", file);
+      form.append("purpose", "interview");
+      form.append("user_id", profile.id);
+      if (profile.name) form.append("name", profile.name);
+      const data = await api.form<InterviewSession>("/api/upload-resume", form);
+      saveInterview({ ...data, started_at: null });
+      navigate("/grant-permissions");
+    } catch (e) {
+      setError((e as Error).message);
+      setUploading(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
+    <div className="min-h-screen">
       <Header />
-      
-      <div className="py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-4xl mx-auto">
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-          <Card>
-            <CardContent className="p-8">
-              <h2 className="text-2xl font-bold mb-4">Upload your Resume (PDF)</h2>
-              <div
-                {...getRootProps()}
-                className={`border-2 border-dashed rounded p-6 text-center ${
-                  uploading ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
-                } ${
-                  isDragActive ? 'border-primary' : 'border-muted'
-                }`}
-              >
-                <input {...getInputProps()} />
-                {!file ? (
-                  <div>
-                    <Upload className="mx-auto mb-4" />
-                    <p className="text-muted-foreground">Drag & drop a PDF here, or click to select</p>
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <FileText />
-                      <span>{file.name}</span>
-                    </div>
-                    <Button variant="ghost" onClick={removeFile}>
-                      <X />
-                    </Button>
-                  </div>
-                )}
-              </div>
+      <main className="container max-w-3xl py-10">
+        <FlowSteps current={0} />
 
-              {error && <p className="text-sm text-destructive mt-4">{error}</p>}
-
-              {uploading && (
-                <div className="mt-4 flex items-center justify-center space-x-2">
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
-                  <p className="text-sm text-muted-foreground">Processing resume and generating questions...</p>
-                </div>
-              )}
-
-              <div className="flex justify-between items-center mt-8">
-                <div className="flex items-center space-x-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => navigate(-1)}
-                    disabled={uploading}
-                    className="flex items-center"
-                  >
-                    <ArrowLeft className="h-4 w-4 mr-2" />
-                    Back
-                  </Button>
-                  
-                  <Button
-                    variant="ghost"
-                    onClick={() => navigate('/dashboard')}
-                    disabled={uploading}
-                    className="flex items-center"
-                  >
-                    <Home className="h-4 w-4 mr-2" />
-                    Home
-                  </Button>
-                </div>
-
-                {file && !uploading && !error && (
-                  <Button
-                    onClick={() => navigate('/grant-permissions')}
-                    className="bg-gradient-to-r from-primary to-accent hover:opacity-90 flex items-center"
-                  >
-                    Continue to Permissions
-                    <ArrowRight className="h-4 w-4 ml-2" />
-                  </Button>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </motion.div>
-
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: 0.3 }} className="mt-8 text-center">
-          <div className="flex items-center justify-center space-x-4 text-sm text-muted-foreground">
-            <span className="text-primary font-medium">1. Start Interview</span>
-            <span>→</span>
-            <span className="text-primary font-medium bg-primary/10 px-3 py-1 rounded-full">2. Upload Resume</span>
-            <span>→</span>
-            <span>3. Grant Permissions</span>
-            <span>→</span>
-            <span>4. Interview Begins</span>
-          </div>
-        </motion.div>
+        <div className="mt-10">
+          <p className="eyebrow mb-3">Step 1</p>
+          <h1 className="display text-4xl sm:text-5xl">Upload your resume</h1>
+          <p className="mt-3 max-w-xl text-muted-foreground">
+            The questions are written from what's on it, so use the version you'd send to a recruiter.
+          </p>
         </div>
-      </div>
+
+        {!uploading ? (
+          <div className="mt-8">
+            <div
+              {...getRootProps()}
+              className={cn(
+                "flex cursor-pointer flex-col items-center justify-center rounded-md border border-dashed bg-card px-6 py-14 text-center transition-colors",
+                isDragActive ? "border-foreground bg-muted" : "hover:border-foreground/40",
+              )}
+            >
+              <input {...getInputProps()} />
+              <Upload className="h-6 w-6 text-muted-foreground" />
+              <p className="mt-4 font-medium">{isDragActive ? "Drop it here" : "Drag your resume here"}</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                or <span className="link-underline text-foreground">browse files</span> · PDF or DOCX, up to 10 MB
+              </p>
+            </div>
+
+            {file && (
+              <div className="mt-4 flex items-center justify-between rounded-md border bg-card px-4 py-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{file.name}</p>
+                    <p className="num text-xs text-muted-foreground">{(file.size / 1024).toFixed(0)} KB</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setFile(null)}
+                  className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="Remove file"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+
+            {error && (
+              <p className="mt-4 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                {error}
+              </p>
+            )}
+
+            <div className="mt-8 flex items-center justify-between border-t pt-6">
+              <p className="max-w-sm text-xs text-muted-foreground">
+                Your resume is processed by the local server only. It is never sent to an external AI service.
+              </p>
+              <Button onClick={start} disabled={!file} size="lg">
+                Generate questions
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-8 rounded-md border bg-card p-8">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium">{file?.name}</p>
+              <span className="num text-xs text-muted-foreground">
+                {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
+              </span>
+            </div>
+            <ol className="mt-6 space-y-3">
+              {STAGES.map((s, i) => (
+                <li key={s} className="flex items-center gap-3 text-sm">
+                  {i < stage ? (
+                    <span className="h-4 w-4 rounded-full bg-success" />
+                  ) : i === stage ? (
+                    <Spinner className="text-foreground" />
+                  ) : (
+                    <span className="h-4 w-4 rounded-full border" />
+                  )}
+                  <span className={i <= stage ? "text-foreground" : "text-muted-foreground"}>{s}</span>
+                </li>
+              ))}
+            </ol>
+            <p className="mt-6 border-t pt-4 text-xs text-muted-foreground">
+              The model runs on this computer, so this usually takes one to two minutes. Keep this tab open.
+            </p>
+          </div>
+        )}
+      </main>
     </div>
   );
-};
-
-export default ResumeUpload;
+}
