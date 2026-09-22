@@ -1,0 +1,166 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here.
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Professional AI Interview Platform Design System */
+    --background: 0 0% 100%;
+    --foreground: 215 25% 27%;
+    --card: 0 0% 100%;
+    --card-foreground: 215 25% 27%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 25% 27%;
+
+    /* Lively and Inviting Theme */
+    --primary: 14 90% 60%;
+    --primary-foreground: 0 0% 98%;
+    --primary-glow: 14 95% 70%;
+    --secondary: 180 68% 45%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 25 100% 97%;
+    --muted-foreground: 25 15% 45%;
+    --accent: 280 85% 65%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 48 96% 89%;
+    --success: 142 76% 36%;
+    --success-foreground: 0 0% 98%;
+    --border: 25 50% 92%;
+    --input: 25 50% 92%;
+    --ring: 14 90% 60%;
+    --radius: 0.75rem;
+
+    /* Lively and Inviting Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(14 90% 60%) 0%, hsl(280 85% 65%) 100%);
+    --gradient-secondary: linear-gradient(135deg, hsl(180 68% 45%) 0%, hsl(180 68% 35%) 100%);
+    --gradient-hero: linear-gradient(135deg, hsl(14 90% 60%) 0%, hsl(280 85% 65%) 50%, hsl(14 95% 70%) 100%);
+    --gradient-card: linear-gradient(145deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%);
+
+    /* Lively Shadows */
+    --shadow-primary: 0 10px 30px -10px hsl(14 90% 60% / 0.3);
+    --shadow-secondary: 0 4px 20px -4px hsl(180 68% 45% / 0.15);
+    --shadow-glow: 0 0 40px hsl(14 95% 70% / 0.4);
+
+    /* Animations */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-spring: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+
+    /* Interview Specific */
+    --camera-border: hsl(14 90% 60%);
+    --gesture-success: hsl(142 76% 36%);
+    --gesture-warning: hsl(38 92% 50%);
+    --gesture-error: hsl(0 84% 60%);
+  }
+
+  .dark {
+    /* Deep Navy Background - matches your screenshot */
+    --background: 220 25% 8%;          /* Very dark navy background */
+    --foreground: 210 40% 92%;         /* Light blue-white text */
+    --card: 220 20% 12%;               /* Dark blue card background */
+    --card-foreground: 210 40% 92%;    /* Light text on cards */
+    --popover: 220 20% 12%;            /* Dark blue popover */
+    --popover-foreground: 210 40% 92%;
+
+    /* Primary Colors - Bright blue accents like your interface */
+    --primary: 210 85% 65%;            /* Bright blue for buttons/links */
+    --primary-foreground: 210 100% 95%;
+    --primary-glow: 210 90% 70%;
+
+    /* Secondary - Darker blue tones */
+    --secondary: 220 50% 35%;          /* Medium dark blue */
+    --secondary-foreground: 210 100% 95%;
+
+    /* Muted Colors - Navy theme */
+    --muted: 220 20% 14%;              /* Dark navy muted background */
+    --muted-foreground: 210 25% 70%;   /* Muted blue-gray text */
+
+    /* Accent - Purple-blue for highlights */
+    --accent: 240 70% 60%;             /* Purple-blue accent */
+    --accent-foreground: 210 100% 95%;
+
+    /* Status Colors */
+    --destructive: 0 65% 45%;
+    --destructive-foreground: 0 0% 98%;
+    --warning: 45 90% 60%;
+    --warning-foreground: 45 100% 95%;
+    --success: 140 65% 50%;            /* Green like your "Smile: 100%" */
+    --success-foreground: 140 100% 95%;
+
+    /* Borders and Inputs - Navy theme */
+    --border: 220 20% 18%;             /* Subtle dark blue borders */
+    --input: 220 20% 16%;              /* Dark input backgrounds */
+    --ring: 210 85% 65%;               /* Bright blue focus rings */
+
+    /* Navy Dark Mode Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(210 85% 65%) 0%, hsl(240 70% 60%) 100%);
+    --gradient-secondary: linear-gradient(135deg, hsl(220 50% 35%) 0%, hsl(220 40% 25%) 100%);
+    --gradient-hero: linear-gradient(135deg, hsl(220 30% 15%) 0%, hsl(240 50% 20%) 50%, hsl(210 85% 65%) 100%);
+    --gradient-card: linear-gradient(145deg, rgba(59, 130, 246, 0.06) 0%, rgba(30, 64, 175, 0.02) 100%);
+
+    /* Deep Navy Shadows */
+    --shadow-primary: 0 10px 30px -10px hsl(220 40% 5% / 0.6);
+    --shadow-secondary: 0 4px 20px -4px hsl(220 30% 6% / 0.4);
+    --shadow-glow: 0 0 40px hsl(210 85% 65% / 0.15);
+
+    /* Interview Specific - Navy theme */
+    --camera-border: hsl(210 85% 65%);
+    --gesture-success: hsl(140 65% 50%);
+    --gesture-warning: hsl(45 90% 60%);
+    --gesture-error: hsl(0 65% 45%);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  /* Custom theme toggle animations */
+  @keyframes slideToDark {
+    0% { transform: translateX(-4px) scale(1); }
+    50% { transform: translateX(2px) scale(1.1); }
+    100% { transform: translateX(4px) scale(1); }
+  }
+  
+  @keyframes slideToLight {
+    0% { transform: translateX(4px) scale(1); }
+    50% { transform: translateX(-2px) scale(1.1); }
+    100% { transform: translateX(-4px) scale(1); }
+  }
+  
+  @keyframes moonGlow {
+    0% { filter: drop-shadow(0 0 3px rgba(148, 163, 184, 0.5)); }
+    100% { filter: drop-shadow(0 0 8px rgba(148, 163, 184, 0.8)); }
+  }
+  
+  @keyframes sunPulse {
+    0%, 100% { transform: scale(1); filter: drop-shadow(0 0 4px rgba(251, 146, 60, 0.6)); }
+    50% { transform: scale(1.1); filter: drop-shadow(0 0 8px rgba(251, 146, 60, 0.9)); }
+  }
+  
+  /* Animation delay utilities */
+  .animate-delay-500 {
+    animation-delay: 0.5s;
+  }
+  
+  .animate-delay-1000 {
+    animation-delay: 1s;
+  }
+  
+  /* Custom easing for theme toggle */
+  .ease-theme-toggle {
+    transition-timing-function: cubic-bezier(0.68, -0.55, 0.265, 1.55);
+  }
+}
