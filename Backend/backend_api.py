@@ -43,7 +43,8 @@ USER_ID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024
-CORS(app, resources={r"/api/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}})
+# allow_private_network lets a hosted frontend (e.g. on Render) call a backend on your own PC.
+CORS(app, resources={r"/api/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}}, allow_private_network=True)
 
 
 # ---------------------------------------------------------------------------

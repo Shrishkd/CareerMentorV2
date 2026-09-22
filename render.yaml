@@ -1,0 +1,33 @@
+# Render Blueprint: hosts the React frontend as a free static site.
+# Render dashboard -> New -> Blueprint -> pick this repo.
+#
+# The backend (Flask + local LLM) needs ~8 GB RAM and Ollama, which Render's free
+# tier can't provide. Run it on your own PC (optionally behind a tunnel) and point
+# the site at it with VITE_API_URL, or from the Dashboard's "Backend address" field.
+services:
+  - type: web
+    runtime: static
+    name: career-mentor
+    rootDir: Frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: NODE_VERSION
+        value: 22.13.1
+      # Public URL of the backend, e.g. https://your-tunnel.trycloudflare.com
+      # (leave empty to set it later from the site's Dashboard).
+      - key: VITE_API_URL
+        sync: false
+      # Optional: Judge0 key for the "Run" button in the code editor.
+      - key: VITE_RAPIDAPI_KEY
+        sync: false
+    routes:
+      # Single-page app: let React Router handle every path (/dashboard, /results, ...).
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable

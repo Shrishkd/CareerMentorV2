@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ArrowRight, Download, FileText, Mic, Pencil } from "lucide-react";
 import Header, { Footer } from "@/components/Header";
 import { Meter, Spinner, formatDate, scoreTone } from "@/components/bits";
 import { useUserStats } from "@/hooks/useUserStats";
 import { useProfile } from "@/hooks/useProfile";
-import { api, download, type InterviewRecord } from "@/lib/api";
+import { api, download, getBackendUrl, setBackendUrl, type InterviewRecord } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface Health {
@@ -103,6 +103,42 @@ function Trend({ interviews }: { interviews: InterviewRecord[] }) {
   );
 }
 
+function BackendAddress() {
+  const client = useQueryClient();
+  const [value, setValue] = useState(getBackendUrl());
+  const [saved, setSaved] = useState(false);
+  return (
+    <form
+      className="mt-4 border-t pt-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setBackendUrl(value);
+        setValue(getBackendUrl());
+        setSaved(true);
+        client.invalidateQueries();
+      }}
+    >
+      <label htmlFor="backend-url" className="text-xs font-medium">Backend address</label>
+      <div className="mt-1.5 flex gap-2">
+        <input
+          id="backend-url"
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setSaved(false);
+          }}
+          placeholder="http://127.0.0.1:8000"
+          className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+        />
+        <button className="h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground">Save</button>
+      </div>
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        {saved ? "Saved for this browser." : "Where the Career Mentor backend is running, e.g. your PC or a tunnel URL."}
+      </p>
+    </form>
+  );
+}
+
 function SystemStatus() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["health"],
@@ -124,7 +160,7 @@ function SystemStatus() {
     <section className="rounded-md border bg-card p-5">
       <h2 className="text-sm font-medium">Local AI status</h2>
       {isLoading && <p className="mt-3 text-sm text-muted-foreground">Checking…</p>}
-      {isError && <p className="mt-3 text-sm text-destructive">Backend not reachable on port 8000.</p>}
+      {isError && <p className="mt-3 text-sm text-destructive">Backend not reachable{getBackendUrl() ? ` at ${getBackendUrl()}` : ""}.</p>}
       <ul className="mt-3 space-y-2">
         {rows.map(([label, ok, detail]) => (
           <li key={label} className="flex items-center justify-between gap-3 text-sm">
@@ -141,6 +177,7 @@ function SystemStatus() {
           Run <code className="num rounded bg-muted px-1">ollama serve</code> and reload. Grading falls back to estimates without it.
         </p>
       )}
+      <BackendAddress />
     </section>
   );
 }

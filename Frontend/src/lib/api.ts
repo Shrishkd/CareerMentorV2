@@ -1,7 +1,32 @@
-// Empty base means "same origin": in development Vite proxies /api to the Flask server.
-export const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+// Where the Flask backend lives. Order of precedence:
+//   1. a URL saved in this browser from the dashboard (lets a hosted frontend point at any backend,
+//      e.g. your own PC or a tunnel, without rebuilding),
+//   2. VITE_API_URL baked in at build time,
+//   3. empty = same origin; in development Vite proxies /api to the Flask server.
+const BACKEND_KEY = "cm_backend_url";
+const BUILD_API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
-export const apiUrl = (path: string) => `${API_BASE}${path}`;
+export function getBackendUrl(): string {
+  try {
+    const saved = localStorage.getItem(BACKEND_KEY);
+    if (saved) return saved;
+  } catch {
+    // storage unavailable
+  }
+  return BUILD_API_BASE;
+}
+
+export function setBackendUrl(url: string) {
+  const clean = url.trim().replace(/\/+$/, "");
+  try {
+    if (clean) localStorage.setItem(BACKEND_KEY, clean);
+    else localStorage.removeItem(BACKEND_KEY);
+  } catch {
+    // storage unavailable
+  }
+}
+
+export const apiUrl = (path: string) => `${getBackendUrl()}${path}`;
 
 export class ApiError extends Error {
   status: number;
@@ -35,7 +60,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     res = await fetch(apiUrl(path), init);
   } catch {
-    throw new ApiError("Can't reach the server. Start the backend with `python backend_api.py`.", 0);
+    throw new ApiError(
+      `Can't reach the backend${getBackendUrl() ? ` at ${getBackendUrl()}` : ""}. Make sure it is running, or set its address on the Dashboard.`,
+      0,
+    );
   }
   return handle<T>(res);
 }

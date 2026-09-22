@@ -96,7 +96,14 @@ finetune/              dataset builder, QLoRA training script, Ollama Modelfile
 
 ## Deployment
 
-`Backend/Dockerfile` builds the API. It expects an Ollama server reachable at `OLLAMA_HOST`. Free hosting tiers such as Render's cannot run a 4B model, so host the backend on a machine with at least 8 GB RAM, or point `OLLAMA_HOST` at a GPU box. The frontend is a static build (`npm run build`, publish `Frontend/dist`) with `VITE_API_URL` set to the backend URL.
+**Frontend on Render (free static site).** `render.yaml` at the repo root is a Render Blueprint: in the Render dashboard choose *New > Blueprint*, select this repo, and fill in `VITE_API_URL` (or leave it empty and set the backend address later from the site's Dashboard > Local AI status > *Backend address*).
+
+**Backend.** It needs Ollama and about 8 GB RAM, which free hosting tiers don't provide, so run it on your own PC:
+
+- Only you use the hosted site: set the backend address to `http://127.0.0.1:8000`. The browser calls your local backend directly (Chrome and Edge allow this; the backend sends the required Private Network Access header).
+- Others should be able to use it: expose your local backend with a tunnel, e.g. `cloudflared tunnel --url http://localhost:8000`, and use the printed `https://....trycloudflare.com` URL as the backend address. The site only works while your PC and the tunnel are running.
+
+`Backend/Dockerfile` builds the API for a machine that can run Ollama (point `OLLAMA_HOST` at it).
 
 ## Author
 
